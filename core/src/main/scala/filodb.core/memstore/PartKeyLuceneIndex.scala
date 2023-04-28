@@ -159,27 +159,26 @@ class PartKeyLuceneIndex(ref: DatasetRef,
   private val numPartColumns = schema.columns.length
 
 
-  val indexDiskLocation = diskLocation.map(new File(_, ref.dataset + File.separator + shardNum))
-    .getOrElse(createTempDir(ref, shardNum)).toPath
+  val indexDiskLocation = diskLocation.get.toPath
 
   // If index rebuild is triggered or the state is Building, simply clean up the index directory and start
   // index rebuild
-  if (
-    lifecycleManager.forall(_.shouldTriggerRebuild(ref, shardNum))
-  ) {
-    logger.info(s"Cleaning up indexDirectory=$indexDiskLocation for  dataset=$ref, shard=$shardNum")
-    deleteRecursively(indexDiskLocation.toFile) match {
-      case Success(_) => // Notify the handler that the directory is now empty
-        logger.info(s"Cleaned directory for dataset=$ref, shard=$shardNum and index directory=$indexDiskLocation")
-        notifyLifecycleListener(IndexState.Empty, System.currentTimeMillis)
-
-      case Failure(t) => // Update index state as TriggerRebuild again and rethrow the exception
-        logger.warn(s"Exception while deleting directory for dataset=$ref, shard=$shardNum " +
-          s"and index directory=$indexDiskLocation with stack trace", t)
-        notifyLifecycleListener(IndexState.TriggerRebuild, System.currentTimeMillis)
-        throw new IllegalStateException("Unable to clean up index directory", t)
-    }
-  }
+//  if (
+//    lifecycleManager.forall(_.shouldTriggerRebuild(ref, shardNum))
+//  ) {
+//    logger.info(s"Cleaning up indexDirectory=$indexDiskLocation for  dataset=$ref, shard=$shardNum")
+//    deleteRecursively(indexDiskLocation.toFile) match {
+//      case Success(_) => // Notify the handler that the directory is now empty
+//        logger.info(s"Cleaned directory for dataset=$ref, shard=$shardNum and index directory=$indexDiskLocation")
+//        notifyLifecycleListener(IndexState.Empty, System.currentTimeMillis)
+//
+//      case Failure(t) => // Update index state as TriggerRebuild again and rethrow the exception
+//        logger.warn(s"Exception while deleting directory for dataset=$ref, shard=$shardNum " +
+//          s"and index directory=$indexDiskLocation with stack trace", t)
+//        notifyLifecycleListener(IndexState.TriggerRebuild, System.currentTimeMillis)
+//        throw new IllegalStateException("Unable to clean up index directory", t)
+//    }
+//  }
   //else {
   // TODO here we assume there is non-empty index which we need to validate
   //}
@@ -672,6 +671,7 @@ class PartKeyLuceneIndex(ref: DatasetRef,
     // If configured and enabled, Multi-column facets will be created on "partition-schema" columns
     createMultiColumnFacets(partKeyOnHeapBytes, partKeyBytesRefOffset)
 
+    // add all label key value in the document.fieldnames and also add it to the inverted index of the lucene
     cforRange { 0 until numPartColumns } { i =>
       indexers(i).fromPartKey(partKeyOnHeapBytes, bytesRefToUnsafeOffset(partKeyBytesRefOffset), partId)
     }
@@ -768,6 +768,17 @@ class PartKeyLuceneIndex(ref: DatasetRef,
     val coll = new TopKPartIdsCollector(topk)
     withNewSearcher(s => s.search(LongPoint.newRangeQuery(END_TIME, fromEndTime, toEndTime), coll))
     coll.topKPartIDsBitmap()
+  }
+
+  /**
+   * Get All Doc count
+   */
+  def getAllDocsCount(): (Long, Long) = {
+    val coll = new AllPartKeyCollector()
+    withNewSearcher(s => s.search(new MatchAllDocsQuery(), coll))
+    val docsCount = coll.getDocsCount()
+    val totalBytes = coll.getTotalBytes()
+    (docsCount, totalBytes)
   }
 
   def foreachPartKeyStillIngesting(func: (Int, BytesRef) => Unit): Int = {
@@ -978,6 +989,42 @@ class NumericDocValueCollector(docValueName: String) extends SimpleCollector {
     } else {
       throw new IllegalStateException("This shouldn't happen since every document should have a docValue")
     }
+  }
+
+  override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES
+}
+
+class AllPartKeyCollector extends SimpleCollector {
+
+  var partKeyDv: BinaryDocValues = _
+  var singleResult: BytesRef = _
+  var docsCount = 0L
+  var totalBytes = 0L
+
+  // gets called for each segment
+  override def doSetNextReader(context: LeafReaderContext): Unit = {
+    partKeyDv = context.reader().getBinaryDocValues(PartKeyLuceneIndex.PART_KEY)
+  }
+
+  // gets called for each matching document in current segment
+  override def collect(doc: Int): Unit = {
+    if (partKeyDv.advanceExact(doc)) {
+      singleResult = partKeyDv.binaryValue()
+      val localBytes = singleResult.bytes
+      // track metrics
+      totalBytes += localBytes.length
+      docsCount += 1
+    } else {
+      throw new IllegalStateException("This shouldn't happen since every document should have a partKeyDv")
+    }
+  }
+
+  def getDocsCount() : Long = {
+    docsCount
+  }
+
+  def getTotalBytes(): Long = {
+    totalBytes
   }
 
   override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES
