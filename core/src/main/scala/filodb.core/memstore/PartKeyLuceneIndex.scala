@@ -31,11 +31,12 @@ import org.apache.lucene.store.{MMapDirectory, NIOFSDirectory}
 import org.apache.lucene.util.{BytesRef, InfoStream}
 import org.apache.lucene.util.automaton.RegExp
 import spire.syntax.cfor._
-import filodb.core.{DatasetRef, GlobalConfig, concurrentCache}
+import filodb.core.{DatasetRef, concurrentCache}
 import filodb.core.Types.PartitionKey
 import filodb.core.binaryrecord2.MapItemConsumer
+import filodb.core.memstore.ratelimit.{CardinalityTracker}
 import filodb.core.metadata.Column.ColumnType.{MapColumn, StringColumn}
-import filodb.core.metadata.{PartitionSchema, Schemas}
+import filodb.core.metadata.PartitionSchema
 import filodb.core.query.{ColumnFilter, Filter}
 import filodb.core.query.Filter._
 import filodb.memory.{BinaryRegionLarge, UTF8StringMedium, UTF8StringShort}
@@ -771,8 +772,8 @@ class PartKeyLuceneIndex(ref: DatasetRef,
   /**
    * Get All Doc count
    */
-  def getAllDocsCount(): (Long, Long) = {
-    val coll = new AllPartKeyCollector()
+  def getAllDocsCount(partSchema: PartitionSchema, cardTracker: CardinalityTracker): (Long, Long) = {
+    val coll = new AllPartKeyCollector(partSchema, cardTracker)
     withNewSearcher(s => s.search(new MatchAllDocsQuery(), coll))
     val docsCount = coll.getDocsCount()
     val totalBytes = coll.getTotalBytes()
@@ -1040,16 +1041,12 @@ class SinglePartIdCollector extends SimpleCollector {
   override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES
 }
 
-class AllPartKeyCollector extends SimpleCollector {
+class AllPartKeyCollector(partSchema: PartitionSchema, cardTracker: CardinalityTracker) extends SimpleCollector {
 
-  var partKeyDv: BinaryDocValues = _
-  var singleResult: BytesRef = _
+  private var partKeyDv: BinaryDocValues = _
+  private var singleResult: BytesRef = _
   var docsCount = 0L
   var totalBytes = 0L
-
-  val allConfig = GlobalConfig.configToDisableAkkaCluster.withFallback(GlobalConfig.systemConfig)
-  val config = allConfig.getConfig("filodb")
-  val partSchema = Schemas.fromConfig(config).get.part
 
   // gets called for each segment
   override def doSetNextReader(context: LeafReaderContext): Unit = {
@@ -1061,8 +1058,13 @@ class AllPartKeyCollector extends SimpleCollector {
     if (partKeyDv.advanceExact(doc)) {
       singleResult = partKeyDv.binaryValue()
       val localBytes = singleResult.bytes
-      var localMap = partSchema.binSchema.toStringPairsMap(localBytes)
-      println("ws:"+ localMap.get("_ws_") + " | ns:"+ localMap.get("_ns_") + " | metric:"+ localMap.get("_metric_"))
+      val localMap = partSchema.binSchema.toStringPairsMap(localBytes)
+      // TODO: use const variables or ƒetch from config for key of ws, ns, metric
+      var shardKey = Seq(
+        localMap.getOrElse("_ws_", ""),
+        localMap.getOrElse("_ns_", ""),
+        localMap.getOrElse("_metric_", ""))
+      cardTracker.modifyCount(shardKey, 1, 1)
       // track metrics
       totalBytes += localBytes.length
       docsCount += 1
