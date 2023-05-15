@@ -13,7 +13,8 @@ object DSCardinalityCount extends App with StrictLogging {
   def start(): Unit = {
     try {
 
-      val ds_data_dir = """/tmp/ds_data"""
+      //val ds_data_dir = """/tmp/ds_data"""
+      val ds_data_dir = """/Users/sandeep/test_dir"""
       val columns = Seq("timestamp:ts", "min:double", "avg:double", "max:double", "count:long")
       val options = DatasetOptions.DefaultOptions.copy(metricColumn = "series")
       val dataset1 = Dataset("metrics1", Seq("series:string"), columns, options)
@@ -25,7 +26,7 @@ object DSCardinalityCount extends App with StrictLogging {
       val defaultQuota = quotaSource.getDefaults(dataset1.ref)
 
       val cardStoreMap = new RocksDbCardinalityStore(dataset1.ref, 10)
-      val cardStoreNoMap = new RocksDbCardinalityStore(dataset1.ref, 10)
+      val cardStoreNoMap = new RocksDbCardinalityStore(dataset1.ref, 5)
 
       val trackerMap = new CardinalityTracker(dataset1.ref, 10, 3,
         defaultQuota, cardStoreMap)
@@ -33,7 +34,7 @@ object DSCardinalityCount extends App with StrictLogging {
         trackerMap.setQuota(q.shardKeyPrefix, q.quota)
       }
 
-      val trackerNoMap = new CardinalityTracker(dataset1.ref, 10, 3,
+      val trackerNoMap = new CardinalityTracker(dataset1.ref, 5, 3,
         defaultQuota, cardStoreNoMap)
       quotaSource.getQuotas(dataset1.ref).foreach { q =>
         trackerNoMap.setQuota(q.shardKeyPrefix, q.quota)
@@ -43,6 +44,12 @@ object DSCardinalityCount extends App with StrictLogging {
       val startTimeMillis = System.currentTimeMillis()
       val idx = new PartKeyLuceneIndex(dataset1.ref, schema1, false,
         false, 10, 1000000,
+        Some(new java.io.File(ds_data_dir)),
+        None
+      )
+
+      val idx2 = new PartKeyLuceneIndex(dataset1.ref, schema1, false,
+        false, 5, 1000000,
         Some(new java.io.File(ds_data_dir)),
         None
       )
@@ -63,7 +70,7 @@ object DSCardinalityCount extends App with StrictLogging {
       println("Using existing modifyCount to write to RocksDB..")
 
       for (i <- 1 to 2) {
-        calculateWithoutAnyMap(idx, i, partSchema, trackerMap, cardStoreMap)
+        calculateWithoutAnyMap(idx2, i, partSchema, trackerNoMap, cardStoreNoMap)
       }
 
     } catch {
@@ -75,9 +82,9 @@ object DSCardinalityCount extends App with StrictLogging {
   def calculateWithMap(idx: PartKeyLuceneIndex, i: Int,
                        partSchema: PartitionSchema, tracker: CardinalityTracker,
                        cardStore: RocksDbCardinalityStore): Unit = {
-    val startTimeMillis = System.currentTimeMillis()
+    var startTimeMillis = System.currentTimeMillis()
     val (docsCount, totalBytes) = idx.getDownsampleCardinalityMap(partSchema, tracker)
-    val endTimeMillis = System.currentTimeMillis()
+    var endTimeMillis = System.currentTimeMillis()
     val durationSecondsCalcCard = (endTimeMillis - startTimeMillis) / 1000
 
     startTimeMillis = System.currentTimeMillis()
@@ -96,9 +103,9 @@ object DSCardinalityCount extends App with StrictLogging {
   def calculateWithoutAnyMap(idx: PartKeyLuceneIndex, i: Int,
                              partSchema: PartitionSchema, tracker: CardinalityTracker,
                              cardStore: RocksDbCardinalityStore): Unit = {
-    val startTimeMillis = System.currentTimeMillis()
+    var startTimeMillis = System.currentTimeMillis()
     val (docsCount, totalBytes) = idx.getDownsampleCardinalityNoMap(partSchema, tracker)
-    val endTimeMillis = System.currentTimeMillis()
+    var endTimeMillis = System.currentTimeMillis()
     val durationSecondsCalcCard = (endTimeMillis - startTimeMillis) / 1000
 
     startTimeMillis = System.currentTimeMillis()

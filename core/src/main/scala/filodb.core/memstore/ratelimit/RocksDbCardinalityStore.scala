@@ -100,6 +100,7 @@ class RocksDbCardinalityStore(ref: DatasetRef, shard: Int) extends CardinalitySt
   private val db = RocksDB.open(options, dbDirInTmp.getAbsolutePath)
   @volatile private var closed = false;
   logger.info(s"Opening new Cardinality DB for shard=$shard dataset=$ref at ${dbDirInTmp.getAbsolutePath}")
+  println(s"Opening new Cardinality DB for shard=$shard dataset=$ref at ${dbDirInTmp.getAbsolutePath}")
 
   private val kryo = new ThreadLocal[Kryo]() {
     override def initialValue(): Kryo = {
