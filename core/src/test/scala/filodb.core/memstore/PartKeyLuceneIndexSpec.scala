@@ -228,8 +228,8 @@ class PartKeyLuceneIndexSpec extends AnyFunSpec with Matchers with BeforeAndAfte
       Some(new java.io.File(ds_data_dir)),
       None
     )
-    val (docsCount, totalBytes) = idx.getAllDocsCount(partSchema, tracker)
-    val allData = cardStore.scanChildren("3")
+    val (docsCount, totalBytes) = idx.getDownsampleCardinalityMap(partSchema, tracker)
+    val allData = cardStore.scanChildren("2")
     allData.foreach(c => {
       println("key: " + c.prefix.mkString(",") + " cardinality-count: "+ c.value.tsCount);
     })
