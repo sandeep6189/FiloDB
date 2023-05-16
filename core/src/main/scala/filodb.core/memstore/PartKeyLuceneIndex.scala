@@ -37,6 +37,7 @@ import spire.syntax.cfor._
 import filodb.core.{concurrentCache, DatasetRef}
 import filodb.core.Types.PartitionKey
 import filodb.core.binaryrecord2.MapItemConsumer
+import filodb.core.memstore.ratelimit.{CardinalityTracker}
 import filodb.core.metadata.Column.ColumnType.{MapColumn, StringColumn}
 import filodb.core.metadata.PartitionSchema
 import filodb.core.query.{ColumnFilter, Filter}
@@ -158,28 +159,29 @@ class PartKeyLuceneIndex(ref: DatasetRef,
 
   private val numPartColumns = schema.columns.length
 
+  val indexDiskLocation = diskLocation.get.toPath
 
-  val indexDiskLocation = diskLocation.map(new File(_, ref.dataset + File.separator + shardNum))
-    .getOrElse(createTempDir(ref, shardNum)).toPath
+//    .map(new File(_, ref.dataset + File.separator + shardNum))
+//    .getOrElse(createTempDir(ref, shardNum)).toPath
 
   // If index rebuild is triggered or the state is Building, simply clean up the index directory and start
   // index rebuild
-  if (
-    lifecycleManager.forall(_.shouldTriggerRebuild(ref, shardNum))
-  ) {
-    logger.info(s"Cleaning up indexDirectory=$indexDiskLocation for  dataset=$ref, shard=$shardNum")
-    deleteRecursively(indexDiskLocation.toFile) match {
-      case Success(_) => // Notify the handler that the directory is now empty
-        logger.info(s"Cleaned directory for dataset=$ref, shard=$shardNum and index directory=$indexDiskLocation")
-        notifyLifecycleListener(IndexState.Empty, System.currentTimeMillis)
-
-      case Failure(t) => // Update index state as TriggerRebuild again and rethrow the exception
-        logger.warn(s"Exception while deleting directory for dataset=$ref, shard=$shardNum " +
-          s"and index directory=$indexDiskLocation with stack trace", t)
-        notifyLifecycleListener(IndexState.TriggerRebuild, System.currentTimeMillis)
-        throw new IllegalStateException("Unable to clean up index directory", t)
-    }
-  }
+//  if (
+//    lifecycleManager.forall(_.shouldTriggerRebuild(ref, shardNum))
+//  ) {
+//    logger.info(s"Cleaning up indexDirectory=$indexDiskLocation for  dataset=$ref, shard=$shardNum")
+//    deleteRecursively(indexDiskLocation.toFile) match {
+//      case Success(_) => // Notify the handler that the directory is now empty
+//        logger.info(s"Cleaned directory for dataset=$ref, shard=$shardNum and index directory=$indexDiskLocation")
+//        notifyLifecycleListener(IndexState.Empty, System.currentTimeMillis)
+//
+//      case Failure(t) => // Update index state as TriggerRebuild again and rethrow the exception
+//        logger.warn(s"Exception while deleting directory for dataset=$ref, shard=$shardNum " +
+//          s"and index directory=$indexDiskLocation with stack trace", t)
+//        notifyLifecycleListener(IndexState.TriggerRebuild, System.currentTimeMillis)
+//        throw new IllegalStateException("Unable to clean up index directory", t)
+//    }
+//  }
   //else {
   // TODO here we assume there is non-empty index which we need to validate
   //}
@@ -770,6 +772,28 @@ class PartKeyLuceneIndex(ref: DatasetRef,
     coll.topKPartIDsBitmap()
   }
 
+  /**
+   * Iterate through the LuceneIndex and calculate cardinality
+   */
+  def getDownsampleCardinalityMap(partSchema: PartitionSchema, cardTracker: CardinalityTracker): (Long, Long) = {
+    val coll = new DSCardinalityCollectorMap(partSchema, cardTracker)
+    withNewSearcher(s => s.search(new MatchAllDocsQuery(), coll))
+    val docsCount = coll.getDocsCount()
+    val totalBytes = coll.getTotalBytes()
+    (docsCount, totalBytes)
+  }
+
+  /**
+   * Iterate through the LuceneIndex and calculate cardinality without using any in-memory aggregation
+   */
+  def getDownsampleCardinalityNoMap(partSchema: PartitionSchema, cardTracker: CardinalityTracker): (Long, Long) = {
+    val coll = new DSCardCollectorNoMap(partSchema, cardTracker)
+    withNewSearcher(s => s.search(new MatchAllDocsQuery(), coll))
+    val docsCount = coll.getDocsCount()
+    val totalBytes = coll.getTotalBytes()
+    (docsCount, totalBytes)
+  }
+
   def foreachPartKeyStillIngesting(func: (Int, BytesRef) => Unit): Int = {
     val coll = new ActionCollector(func)
     withNewSearcher(s => s.search(LongPoint.newExactQuery(END_TIME, Long.MaxValue), coll))
@@ -1026,6 +1050,141 @@ class SinglePartIdCollector extends SimpleCollector {
     } else {
       throw new IllegalStateException("This shouldn't happen since every document should have a partKeyDv")
     }
+  }
+
+  override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES
+}
+
+class DSCardinalityCollectorMap(partSchema: PartitionSchema, cardTracker: CardinalityTracker) extends SimpleCollector {
+
+  private var partKeyDv: BinaryDocValues = _
+  private var singleResult: BytesRef = _
+  var docsCount = 0L
+  var totalBytes = 0L
+
+  // TODO: add doc
+  var cardinalityTrackerMap: scala.collection.mutable.Map[Seq[String], (Int, Int)] = scala.collection.mutable.Map()
+
+  // gets called for each segment
+  override def doSetNextReader(context: LeafReaderContext): Unit = {
+    partKeyDv = context.reader().getBinaryDocValues(PartKeyLuceneIndex.PART_KEY)
+  }
+
+  def flushCardinalityDataToRocksDB(): Unit = {
+    if (cardinalityTrackerMap.size > 0) {
+      // iterate through map and store each prefix and count to the rocksDB
+      cardinalityTrackerMap.foreach(kv => {
+        cardTracker.modifyCountAgg(kv._1, kv._2._1, kv._2._1, kv._2._2)
+      })
+
+      // clear the map
+      cardinalityTrackerMap.clear()
+    }
+  }
+
+  def updateCardinalityCounts(shardKey: Seq[String]): Unit = {
+    (0 to shardKey.length).foreach { i =>
+      val prefix = shardKey.take(i)
+
+      val mapKV = cardinalityTrackerMap.get(prefix)
+        .map(x => (x._1 + 1, x._2))
+        .getOrElse((1, 0)) // child prefix update parent's childrenCount
+
+      cardinalityTrackerMap.put(prefix, mapKV)
+
+      if (i > 0) {
+        // update children count of parent
+        val parentPrefix = shardKey.take(i-1)
+
+        // we always add parent before the child, hence it is okay to get the parent prefix's record directly
+        // without the None check
+        val mapKV = cardinalityTrackerMap.get(parentPrefix)
+          .map(x => (x._1, x._2 + 1)).get
+
+        cardinalityTrackerMap.put(parentPrefix, mapKV)
+      }
+    }
+
+    // TODO: move this static value to a config ?
+    if (cardinalityTrackerMap.size > 5000) {
+      flushCardinalityDataToRocksDB()
+    }
+  }
+
+  // gets called for each matching document in current segment
+  override def collect(doc: Int): Unit = {
+    if (partKeyDv.advanceExact(doc)) {
+      singleResult = partKeyDv.binaryValue()
+      val localBytes = singleResult.bytes
+      val localMap = partSchema.binSchema.toStringPairsMap(localBytes)
+      // TODO: use const variables or ƒetch from config for key of ws, ns, metric
+
+      var shardKey = Seq(
+        localMap.getOrElse("_ws_", ""),
+        localMap.getOrElse("_ns_", ""),
+        localMap.getOrElse("_metric_", ""))
+      // cardTracker.modifyCount(shardKey, 1, 1)
+      updateCardinalityCounts(shardKey)
+      // track metrics
+      totalBytes += localBytes.length
+      docsCount += 1
+    } else {
+      throw new IllegalStateException("This shouldn't happen since every document should have a partKeyDv")
+    }
+  }
+
+  def getDocsCount() : Long = {
+    flushCardinalityDataToRocksDB()
+    docsCount
+  }
+
+  def getTotalBytes(): Long = {
+    flushCardinalityDataToRocksDB()
+    totalBytes
+  }
+
+  override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES
+}
+
+class DSCardCollectorNoMap(partSchema: PartitionSchema, cardTracker: CardinalityTracker) extends SimpleCollector {
+
+  private var partKeyDv: BinaryDocValues = _
+  private var singleResult: BytesRef = _
+  var docsCount = 0L
+  var totalBytes = 0L
+
+  // gets called for each segment
+  override def doSetNextReader(context: LeafReaderContext): Unit = {
+    partKeyDv = context.reader().getBinaryDocValues(PartKeyLuceneIndex.PART_KEY)
+  }
+
+  // gets called for each matching document in current segment
+  override def collect(doc: Int): Unit = {
+    if (partKeyDv.advanceExact(doc)) {
+      singleResult = partKeyDv.binaryValue()
+      val localBytes = singleResult.bytes
+      val localMap = partSchema.binSchema.toStringPairsMap(localBytes)
+      // TODO: use const variables or ƒetch from config for key of ws, ns, metric
+
+      var shardKey = Seq(
+        localMap.getOrElse("_ws_", ""),
+        localMap.getOrElse("_ns_", ""),
+        localMap.getOrElse("_metric_", ""))
+      cardTracker.modifyCount(shardKey, 1, 1)
+      // track metrics
+      totalBytes += localBytes.length
+      docsCount += 1
+    } else {
+      throw new IllegalStateException("This shouldn't happen since every document should have a partKeyDv")
+    }
+  }
+
+  def getDocsCount() : Long = {
+    docsCount
+  }
+
+  def getTotalBytes(): Long = {
+    totalBytes
   }
 
   override def scoreMode(): ScoreMode = ScoreMode.COMPLETE_NO_SCORES

@@ -3,6 +3,7 @@ package filodb.core.memstore
 import com.googlecode.javaewah.IntIterator
 import filodb.core._
 import filodb.core.binaryrecord2.{RecordBuilder, RecordSchema}
+import filodb.core.memstore.ratelimit.{CardinalityTracker, ConfigQuotaSource, RocksDbCardinalityStore}
 import filodb.core.metadata.Schemas
 import filodb.core.query.{ColumnFilter, Filter}
 import filodb.memory.format.UnsafeUtils.ZeroPointer
@@ -18,6 +19,7 @@ import java.nio.file.{Files, StandardOpenOption}
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
 import scala.util.Random
+import filodb.core.metadata.{Dataset, DatasetOptions}
 
 class PartKeyLuceneIndexSpec extends AnyFunSpec with Matchers with BeforeAndAfter {
   import Filter._
@@ -199,6 +201,39 @@ class PartKeyLuceneIndexSpec extends AnyFunSpec with Matchers with BeforeAndAfte
     }
     numHits shouldEqual 5
     partIdsIngesting shouldEqual Seq(1, 3, 5, 7, 9)
+
+  }
+
+  it("run ds cardinality") {
+    val ds_data_dir = """/Users/sandeep/test_dir"""
+    val columns = Seq("timestamp:ts", "min:double", "avg:double", "max:double", "count:long")
+    val options = DatasetOptions.DefaultOptions.copy(metricColumn = "series")
+    val dataset1 = Dataset("metrics1", Seq("series:string"), columns, options)
+    val schema1 = dataset1.schema.partition
+    val allConfig = GlobalConfig.configToDisableAkkaCluster.withFallback(GlobalConfig.systemConfig)
+    val config = allConfig.getConfig("filodb")
+    val partSchema = Schemas.fromConfig(config).get.part
+    val cardStore = new RocksDbCardinalityStore(dataset1.ref, 10)
+
+    val quotaSource = new ConfigQuotaSource(config, 3)
+    val defaultQuota = quotaSource.getDefaults(dataset1.ref)
+    val tracker = new CardinalityTracker(dataset1.ref, 10, 3,
+      defaultQuota, cardStore)
+    quotaSource.getQuotas(dataset1.ref).foreach { q =>
+      tracker.setQuota(q.shardKeyPrefix, q.quota)
+    }
+
+    val idx = new PartKeyLuceneIndex(dataset1.ref, schema1, false,
+      false, 10, 1000000,
+      Some(new java.io.File(ds_data_dir)),
+      None
+    )
+    val (docsCount, totalBytes) = idx.getDownsampleCardinalityMap(partSchema, tracker)
+    val allData = cardStore.scanChildren("2")
+    allData.foreach(c => {
+      println("key: " + c.prefix.mkString(",") + " cardinality-count: "+ c.value.tsCount);
+    })
+    print(docsCount)
 
   }
 

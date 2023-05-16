@@ -102,6 +102,24 @@ class CardinalityTracker(ref: DatasetRef,
     }
   }
 
+  def modifyCountAgg(prefix: Seq[String], totalDelta: Int, activeDelta: Int, childrenDelta: Int): Unit = synchronized {
+
+    // note this method is synchronized since the read-modify-write pattern that happens here is not thread-safe
+    // modifyCount and decrementCount methods are protected this way
+    val old = store.getOrZero(prefix,
+      CardinalityRecord(shard, prefix, CardinalityValue(0, 0, 0, defaultChildrenQuota(prefix.length))))
+
+    val neu = old.copy(value = old.value.copy(tsCount = old.value.tsCount + totalDelta,
+      activeTsCount = old.value.activeTsCount + activeDelta,
+      childrenCount = old.value.childrenCount + childrenDelta))
+
+    if (neu.value.childrenCount > neu.value.childrenQuota) {
+      quotaExceededProtocol.quotaExceeded(ref, shard, prefix, neu.value.childrenQuota)
+      throw QuotaReachedException(prefix, prefix, neu.value.childrenQuota)
+    }
+
+    store.store(neu)
+  }
 
 
   /**

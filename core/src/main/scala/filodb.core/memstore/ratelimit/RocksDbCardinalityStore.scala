@@ -59,8 +59,8 @@ object RocksDbCardinalityStore {
 
   // ======= DB Tuning ===========
   // not making them config intentionally since RocksDB tuning needs more care
-  private[ratelimit] val TOTAL_OFF_HEAP_SIZE = 32L << 20 // 32 MB
-  private[ratelimit] val LRU_CACHE_SIZE = 16L << 20 // 16 MB
+  private[ratelimit] val TOTAL_OFF_HEAP_SIZE = 128L << 20 // 128 MB
+  private[ratelimit] val LRU_CACHE_SIZE = 128L << 20 // 128 MB
   private val BLOCK_SIZE = 4096L // 4 KB
   private val NUM_WRITE_BUFFERS = 4
   private val WRITE_BUF_SIZE = 4L << 20 // 4 MB
@@ -100,6 +100,7 @@ class RocksDbCardinalityStore(ref: DatasetRef, shard: Int) extends CardinalitySt
   private val db = RocksDB.open(options, dbDirInTmp.getAbsolutePath)
   @volatile private var closed = false;
   logger.info(s"Opening new Cardinality DB for shard=$shard dataset=$ref at ${dbDirInTmp.getAbsolutePath}")
+  println(s"Opening new Cardinality DB for shard=$shard dataset=$ref at ${dbDirInTmp.getAbsolutePath}")
 
   private val kryo = new ThreadLocal[Kryo]() {
     override def initialValue(): Kryo = {
@@ -304,6 +305,64 @@ class RocksDbCardinalityStore(ref: DatasetRef, shard: Int) extends CardinalitySt
               childrenQuota = childrenQuota + node.childrenQuota
             } else {
               break  // don't continue beyond valid results
+            }
+            it.next()
+          } while (it.isValid())
+        }
+        buf.append(CardinalityRecord(shard, OVERFLOW_PREFIX, CardinalityValue(
+          tsCount, activeTsCount, childrenCount, childrenQuota)))
+      }
+    } finally {
+      it.close();
+    }
+    buf
+  }
+
+
+  def scanChildren(searchPrefix: String): Seq[CardinalityRecord] = {
+
+    val it = db.newIterator()
+    val buf = new ArrayBuffer[CardinalityRecord]()
+    try {
+      logger.debug(s"Scanning shard=$shard dataset=$ref ${new String(searchPrefix)}")
+      it.seek(searchPrefix.getBytes(StandardCharsets.UTF_8))
+      import scala.util.control.Breaks._
+
+      var complete = false
+      breakable {
+        while (it.isValid() && (buf.size < MAX_RESULT_SIZE)) {
+          val key = new String(it.key(), StandardCharsets.UTF_8)
+          if (key.startsWith(searchPrefix)) {
+            val node = bytesToCardinalityValue(it.value())
+            // Drop the first element, since it's just the size of the prefix.
+            // Ex: 2{KeySeparator}A{KeySeparator}B ==(split)==> [2, A, B] ==(drop)==> [A, B]
+            val prefix = key.split(KeySeparator).drop(1)
+            buf += CardinalityValue.toCardinalityRecord(node, prefix, shard)
+          } else {
+            // no matching prefixes remain
+            complete = true
+            break
+          }
+          it.next()
+        }
+      }
+
+      // result reached MAX_RESULT_SIZE, but still more cardinalities
+      if (it.isValid() && !complete) {
+        // sum the remaining counts into these values
+        var tsCount, activeTsCount, childrenCount, childrenQuota = 0
+        breakable {
+          do {
+            // note: the iterator is valid here on the first iteration
+            val key = new String(it.key(), StandardCharsets.UTF_8)
+            if (key.startsWith(searchPrefix)) {
+              val node = bytesToCardinalityValue(it.value())
+              tsCount = tsCount + node.tsCount
+              activeTsCount = activeTsCount + node.activeTsCount
+              childrenCount = childrenCount + node.childrenCount
+              childrenQuota = childrenQuota + node.childrenQuota
+            } else {
+              break // don't continue beyond valid results
             }
             it.next()
           } while (it.isValid())
