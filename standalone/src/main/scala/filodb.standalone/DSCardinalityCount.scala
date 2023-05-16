@@ -13,8 +13,8 @@ object DSCardinalityCount extends App with StrictLogging {
   def start(): Unit = {
     try {
 
-      //val ds_data_dir = """/tmp/ds_data"""
-      val ds_data_dir = """/Users/sandeep/test_dir"""
+      val ds_data_dir = """/tmp/ds_data"""
+      //val ds_data_dir = """/Users/sandeep/test_dir"""
       val columns = Seq("timestamp:ts", "min:double", "avg:double", "max:double", "count:long")
       val options = DatasetOptions.DefaultOptions.copy(metricColumn = "series")
       val dataset1 = Dataset("metrics1", Seq("series:string"), columns, options)
@@ -25,31 +25,11 @@ object DSCardinalityCount extends App with StrictLogging {
       val quotaSource = new ConfigQuotaSource(config, 3)
       val defaultQuota = quotaSource.getDefaults(dataset1.ref)
 
-      val cardStoreMap = new RocksDbCardinalityStore(dataset1.ref, 10)
-      val cardStoreNoMap = new RocksDbCardinalityStore(dataset1.ref, 5)
-
-      val trackerMap = new CardinalityTracker(dataset1.ref, 10, 3,
-        defaultQuota, cardStoreMap)
-      quotaSource.getQuotas(dataset1.ref).foreach { q =>
-        trackerMap.setQuota(q.shardKeyPrefix, q.quota)
-      }
-
-      val trackerNoMap = new CardinalityTracker(dataset1.ref, 5, 3,
-        defaultQuota, cardStoreNoMap)
-      quotaSource.getQuotas(dataset1.ref).foreach { q =>
-        trackerNoMap.setQuota(q.shardKeyPrefix, q.quota)
-      }
-
       println("Creating Lucene Index...")
+      logger.info("Creating Lucene Index...")
       val startTimeMillis = System.currentTimeMillis()
       val idx = new PartKeyLuceneIndex(dataset1.ref, schema1, false,
         false, 10, 1000000,
-        Some(new java.io.File(ds_data_dir)),
-        None
-      )
-
-      val idx2 = new PartKeyLuceneIndex(dataset1.ref, schema1, false,
-        false, 5, 1000000,
         Some(new java.io.File(ds_data_dir)),
         None
       )
@@ -60,17 +40,31 @@ object DSCardinalityCount extends App with StrictLogging {
       println(result)
 
       println()
-      println("Calculating with in-memory aggreation before writing to RocksDB..")
+      println("Calculating with in-memory aggregation before writing to RocksDB..")
+      logger.info("Calculating with in-memory aggregation before writing to RocksDB..")
 
       for (i <- 1 to 2) {
+        val cardStoreMap = new RocksDbCardinalityStore(dataset1.ref, 10)
+        val trackerMap = new CardinalityTracker(dataset1.ref, 10, 3,
+          defaultQuota, cardStoreMap)
+        quotaSource.getQuotas(dataset1.ref).foreach { q =>
+          trackerMap.setQuota(q.shardKeyPrefix, q.quota)
+        }
         calculateWithMap(idx, i, partSchema, trackerMap, cardStoreMap)
       }
 
       println()
       println("Using existing modifyCount to write to RocksDB..")
+      logger.info("Using existing modifyCount to write to RocksDB..")
 
       for (i <- 1 to 2) {
-        calculateWithoutAnyMap(idx2, i, partSchema, trackerNoMap, cardStoreNoMap)
+        val cardStoreNoMap = new RocksDbCardinalityStore(dataset1.ref, 10)
+        val trackerNoMap = new CardinalityTracker(dataset1.ref, 5, 3,
+          defaultQuota, cardStoreNoMap)
+        quotaSource.getQuotas(dataset1.ref).foreach { q =>
+          trackerNoMap.setQuota(q.shardKeyPrefix, q.quota)
+        }
+        calculateWithoutAnyMap(idx, i, partSchema, trackerNoMap, cardStoreNoMap)
       }
 
     } catch {
@@ -93,7 +87,7 @@ object DSCardinalityCount extends App with StrictLogging {
     val durationSecondsScanRocksDB = (endTimeMillis - startTimeMillis) / 1000
 
     val totalBytesInGB = (totalBytes * 1.0) / 1000000000.0
-    val result = s"Iteration: $i | DocCount: $docsCount | TotalBytes: $totalBytes " +
+    val result = s"[With InMemoryAggregation] Iteration: $i | DocCount: $docsCount | TotalBytes: $totalBytes " +
       s"| TotalBytesInGB: $totalBytesInGB | DurationInSecondsToCalculateCardinality: $durationSecondsCalcCard" +
       s"| DurationSecondsScanRocksDB: $durationSecondsScanRocksDB"
     logger.info(result)
@@ -114,7 +108,7 @@ object DSCardinalityCount extends App with StrictLogging {
     val durationSecondsScanRocksDB = (endTimeMillis - startTimeMillis) / 1000
 
     val totalBytesInGB = (totalBytes*1.0)/1000000000.0
-    val result = s"Iteration: $i | DocCount: $docsCount | TotalBytes: $totalBytes " +
+    val result = s"[WithOut Any Aggregation] Iteration: $i | DocCount: $docsCount | TotalBytes: $totalBytes " +
       s"| TotalBytesInGB: $totalBytesInGB | DurationInSecondsToCalculateCardinality: $durationSecondsCalcCard" +
       s"| DurationSecondsScanRocksDB: $durationSecondsScanRocksDB"
     logger.info(result)
@@ -124,20 +118,29 @@ object DSCardinalityCount extends App with StrictLogging {
   def printRocksDBScanResults(cardStore: RocksDbCardinalityStore): Unit = {
     val allWsData = cardStore.scanChildren("1")
     allWsData.foreach(c => {
-      println("key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount);
+      val resultStr = "key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount
+      println(resultStr)
+      logger.info(resultStr)
     })
     println("Num Unique Workspaces: " + allWsData.size)
+    logger.info("Num Unique Workspaces: " + allWsData.size)
 
     val allNSData = cardStore.scanChildren("2")
     allNSData.foreach(c => {
-      println("key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount);
+      val resultStr = "key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount
+      println(resultStr)
+      logger.info(resultStr)
     })
     println("Num Unique Namespaces: " + allNSData.size)
+    logger.info("Num Unique Namespaces: " + allNSData.size)
 
     val allMSData = cardStore.scanChildren("3")
     allMSData.foreach(c => {
-      println("key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount);
+      val resultStr = "key: " + c.prefix.mkString(",") + " cardinality-count: " + c.value.tsCount
+      println(resultStr)
+      logger.info(resultStr)
     })
     println("Num Unique Metrics: " + allMSData.size)
+    logger.info("Num Unique Metrics: " + allMSData.size)
   }
 }
