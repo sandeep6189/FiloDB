@@ -190,6 +190,13 @@ import filodb.query.exec._
     PlanResult(Seq(execPlan))
   }
 
+  private def materializeTsCardinalitiesPlan(qContext: QueryContext, logicalPlan: LogicalPlan): PlanResult = {
+    val rawPlan = rawClusterPlanner.materialize(logicalPlan, qContext)
+    val dsPlan = downsampleClusterPlanner.materialize(logicalPlan, qContext)
+    val reduceExec = TsCardReduceExec(qContext, stitchDispatcher, Seq(rawPlan, dsPlan))
+    PlanResult(Seq(reduceExec))
+  }
+
   // scalastyle:off cyclomatic.complexity
   override def walkLogicalPlanTree(logicalPlan: LogicalPlan,
                                    qContext: QueryContext,
@@ -219,7 +226,7 @@ import filodb.query.exec._
       case lp: BinaryJoin                  => materializePeriodicSeriesPlan(qContext, lp)
       case lp: ScalarVectorBinaryOperation => super.materializeScalarVectorBinOp(qContext, lp)
       case lp: LabelValues                 => rawClusterMaterialize(qContext, lp)
-      case lp: TsCardinalities             => rawClusterMaterialize(qContext, lp)
+      case lp: TsCardinalities             => materializeTsCardinalitiesPlan(qContext, lp)
       case lp: SeriesKeysByFilters         => rawClusterMaterialize(qContext, lp)
       case lp: ApplyMiscellaneousFunction  => super.materializeApplyMiscellaneousFunction(qContext, lp)
       case lp: ApplySortFunction           => super.materializeApplySortFunction(qContext, lp)

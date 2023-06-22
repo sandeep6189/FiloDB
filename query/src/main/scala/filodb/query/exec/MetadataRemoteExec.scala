@@ -82,7 +82,8 @@ case class MetadataRemoteExec(queryEndpoint: String,
     val rows = response.data.asInstanceOf[Seq[TsCardinalitiesSampl]]
       .map { ts =>
         val prefix = SHARD_KEY_LABELS.take(ts.group.size).map(l => ts.group(l))
-        val counts = CardCounts(ts.cardinality("active"), ts.cardinality("total"))
+        val counts = CardCounts(ts.cardinality("active"), ts.cardinality("total"),
+          ts.cardinality.getOrElse("longterm", 0))
         CardRowReader(prefixToGroup(prefix), counts)
       }
     val rv = IteratorBackedRangeVector(CustomRangeVectorKey.empty, NoCloseCursor(rows.iterator), None)
