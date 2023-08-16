@@ -177,6 +177,8 @@ class CardinalityTracker(ref: DatasetRef,
       }
     }
     if (cardinalityCountMap.size > threshold) {
+      logger.debug(s"Flushing to RocksDB. CardinalityCountMap size: $cardinalityCountMap.size")
+      println(s"Flushing to RocksDB. CardinalityCountMap size: $cardinalityCountMap.size")
       flushCardinalityCount()
     }
     // NOTE: We are not using the returned CardinalityRecord records when modifying count

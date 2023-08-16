@@ -51,6 +51,8 @@ object DSCardPerfTest extends App with StrictLogging {
 //    println(result)
 
     for (i <- 1 to iterationLimit) {
+      println("Running iteration: " + i)
+      logger.info("Running iteration: " + i)
       iterateAndStore(idx, i, schema1, cardTracker)
     }
   }
