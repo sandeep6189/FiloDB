@@ -18,7 +18,8 @@ class CardinalityManager(datasetRef: DatasetRef,
                          partSchema: PartitionSchema,
                          filodbConfig: Config,
                          meteringEnabled: Boolean,
-                         quotaSource: QuotaSource) extends StrictLogging {
+                         quotaSource: QuotaSource,
+                         flushCount: Int) extends StrictLogging {
 
   // Initializing cardTracker to None initially. shouldTriggerCardinalityCount evaluates to true when cardTracker
   // is set to None
@@ -197,7 +198,8 @@ class CardinalityManager(datasetRef: DatasetRef,
   private def getNewCardTracker(): CardinalityTracker = {
     val cardStore = new RocksDbCardinalityStore(datasetRef, shardNum)
     val defaultQuota = quotaSource.getDefaults(datasetRef)
-    val tracker = new CardinalityTracker(datasetRef, shardNum, shardKeyLen, defaultQuota, cardStore)
+    val tracker = new CardinalityTracker(datasetRef, shardNum, shardKeyLen, defaultQuota, cardStore,
+      flushCount = Some(flushCount))
     quotaSource.getQuotas(datasetRef).foreach { q =>
       tracker.setQuota(q.shardKeyPrefix, q.quota)
     }

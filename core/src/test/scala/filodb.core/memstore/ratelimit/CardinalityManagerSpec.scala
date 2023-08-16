@@ -35,7 +35,7 @@ class CardinalityManagerSpec extends AnyFunSpec with Matchers with BeforeAndAfte
     val idx = getTestLuceneIndex(testShardNum, "shouldTriggerCardinalityCountPath")
     val cardManager = new CardinalityManager(
       MetricsTestData.timeseriesDatasetMultipleShardKeys.ref, testShardNum, shardKeyLen, idx, partSchema,
-      filodbConfig, true, quotaSource)
+      filodbConfig, true, quotaSource, 10)
 
     var resultMap: Map[Int, Set[Int]] = Map()
     resultMap += (0 -> Set(0, 8, 16))
@@ -80,7 +80,7 @@ class CardinalityManagerSpec extends AnyFunSpec with Matchers with BeforeAndAfte
     val idx = getTestLuceneIndex(testShardNum, "getNumShardsPerNodeFromConfigPath")
     val cardManager = new CardinalityManager(
       MetricsTestData.timeseriesDatasetMultipleShardKeys.ref, testShardNum, shardKeyLen, idx, partSchema,
-      filodbConfig, true, quotaSource)
+      filodbConfig, true, quotaSource, 20)
 
     // `dataset-config` has required config
     val confWithDatasetConfigs =

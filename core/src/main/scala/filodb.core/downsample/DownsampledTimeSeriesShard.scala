@@ -125,9 +125,10 @@ class DownsampledTimeSeriesShard(rawDatasetRef: DatasetRef,
   private var gaugeUpdateFuture: CancelableFuture[Unit] = _
 
   // CardinalityManager object helps with measuring and storing the cardinality count for the shard
+  // TODO: get value from config
   private val cardManager: CardinalityManager =
     new CardinalityManager(rawDatasetRef, shardNum, schemas.part.options.shardKeyColumns.length,
-      partKeyIndex, schemas.part, filodbConfig, downsampleStoreConfig.meteringEnabled, quotaSource)
+      partKeyIndex, schemas.part, filodbConfig, downsampleStoreConfig.meteringEnabled, quotaSource, 100000)
 
   // indexRefreshCount tracks the number of times the indexRefresh jobs have successfully ran
   private var indexRefreshCount = 0
