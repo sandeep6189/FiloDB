@@ -1069,6 +1069,7 @@ class CardinalityCountBuilder(partSchema: PartitionSchema, cardTracker: Cardinal
 
       try {
         // update the cardinality count by 1, since the shardKey for each document in index is unique
+        println(s"shardKey: $shardKey.toString()")
         cardTracker.modifyCount(shardKey, 1, 0)
       } catch {
         case t: Throwable =>

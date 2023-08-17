@@ -148,6 +148,7 @@ class CardinalityTracker(ref: DatasetRef,
    */
   private def modifyCountWithAggregation(shardKey: Seq[String], threshold: Int,
                                          totalDelta: Int): Seq[CardinalityRecord] = synchronized {
+    println(s"Using aggregation route  ${shardKey.toString()}")
     (0 to shardKey.length).foreach { i =>
       // update current prefix's cardinality count
       val prefix = shardKey.take(i)
