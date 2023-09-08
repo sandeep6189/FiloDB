@@ -71,8 +71,10 @@ object LogicalPlanUtils extends StrictLogging {
       case lp: LabelValues                 => TimeRange(lp.startMs, lp.endMs)
       case lp: LabelCardinality            => TimeRange(lp.startMs, lp.endMs)
       case lp: LabelNames                  => TimeRange(lp.startMs, lp.endMs)
-      case lp: TsCardinalities             => throw new UnsupportedOperationException(
-                                                          "TsCardinalities does not have times")
+      // TsCardinalites logical plan doesn't have a times. However, we are giving a time range for
+      // HighAvailabilityPlanner to get the failure record
+      // TODO: Ask Amol and Alex on the time range values
+      case lp: TsCardinalities             => TimeRange(System.currentTimeMillis() - 300000, System.currentTimeMillis())
       case lp: SeriesKeysByFilters         => TimeRange(lp.startMs, lp.endMs)
       case lp: ApplyInstantFunctionRaw     => getTimeFromLogicalPlan(lp.vectors)
       case lp: ScalarBinaryOperation       => TimeRange(lp.rangeParams.startSecs * 1000, lp.rangeParams.endSecs * 1000)

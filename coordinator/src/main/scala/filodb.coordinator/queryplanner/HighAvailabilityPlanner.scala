@@ -1,17 +1,14 @@
 package filodb.coordinator.queryplanner
 
 import java.util.concurrent.ConcurrentHashMap
-
 import scala.collection.concurrent.{Map => ConcurrentMap}
 import scala.jdk.CollectionConverters._
-
 import com.typesafe.scalalogging.StrictLogging
 import io.grpc.ManagedChannel
-
 import filodb.core.DatasetRef
 import filodb.core.query.{PromQlQueryParams, QueryConfig, QueryContext}
 import filodb.grpc.GrpcCommonUtils
-import filodb.query.{LabelNames, LabelValues, LogicalPlan, SeriesKeysByFilters}
+import filodb.query.{LabelNames, LabelValues, LogicalPlan, SeriesKeysByFilters, TsCardinalities}
 import filodb.query.exec._
 
 
@@ -72,6 +69,8 @@ class HighAvailabilityPlanner(dsRef: DatasetRef,
                                         execPlans.sortWith((x, y) => !x.isInstanceOf[MetadataRemoteExec]))
         case lp: SeriesKeysByFilters => PartKeysDistConcatExec(queryContext, inProcessPlanDispatcher,
                                         execPlans.sortWith((x, y) => !x.isInstanceOf[MetadataRemoteExec]))
+        case lp: TsCardinalities     => TsCardReduceExec(queryContext, inProcessPlanDispatcher,
+                                        execPlans.sortWith((x, _) => !x.isInstanceOf[MetadataRemoteExec]))
         case _                       => StitchRvsExec(queryContext, inProcessPlanDispatcher,
                                          rvRangeFromPlan(rootLogicalPlan),
                                          execPlans.sortWith((x, y) => !x.isInstanceOf[PromQlRemoteExec]))
@@ -114,12 +113,17 @@ class HighAvailabilityPlanner(dsRef: DatasetRef,
             case lp: LabelValues         => MetadataRemoteExec(httpEndpoint, remoteHttpTimeoutMs,
                                             PlannerUtil.getLabelValuesUrlParams(lp, queryParams), newQueryContext,
                                             inProcessPlanDispatcher, dsRef, remoteExecHttpClient, queryConfig)
-            case lp: LabelNames         => MetadataRemoteExec(httpEndpoint, remoteHttpTimeoutMs,
+            case lp: LabelNames          => MetadataRemoteExec(httpEndpoint, remoteHttpTimeoutMs,
                                             Map("match[]" -> queryParams.promQl), newQueryContext,
                                             inProcessPlanDispatcher, dsRef, remoteExecHttpClient, queryConfig)
             case lp: SeriesKeysByFilters => val urlParams = Map("match[]" -> queryParams.promQl)
                                             MetadataRemoteExec(httpEndpoint, remoteHttpTimeoutMs,
                                               urlParams, newQueryContext, inProcessPlanDispatcher,
+                                              dsRef, remoteExecHttpClient, queryConfig)
+            case lp: TsCardinalities     => val qContextCard = qContext
+                                                     .copy(origQueryParams = queryParams.copy(verbose = true))
+                                            MetadataRemoteExec(httpEndpoint, remoteHttpTimeoutMs,
+                                              lp.queryParams(), qContextCard, inProcessPlanDispatcher,
                                               dsRef, remoteExecHttpClient, queryConfig)
             case _                       =>
               if (remoteGrpcEndpoint.isDefined && !(queryConfig.grpcPartitionsDenyList.contains("*") ||

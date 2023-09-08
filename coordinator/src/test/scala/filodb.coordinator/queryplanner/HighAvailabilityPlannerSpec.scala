@@ -503,12 +503,36 @@ class HighAvailabilityPlannerSpec extends AnyFunSpec with Matchers {
     queryParams.endSecs shouldEqual(10000)
   }
 
-  it("should generate PromQlExec for metadata queries") {
+  it("should generate MetadataRemoteExec for metadata queries") {
     val to = 10000
     val from = 100
     val intervalSelector = IntervalSelector(from, to)
     val lp = Parser.metadataQueryToLogicalPlan("http_requests_total{job=\"prometheus\", method=\"GET\"}",
       TimeStepParams(from, 20, to))
+
+    val failureProvider = new FailureProvider {
+      override def getFailures(datasetRef: DatasetRef, queryTimeRange: TimeRange): Seq[FailureTimeRange] = {
+        Seq(FailureTimeRange("local", datasetRef,
+          TimeRange(from * 1000, (from + 200) * 1000), false))
+      }
+    }
+
+    val engine = new HighAvailabilityPlanner(dsRef, localPlanner, failureProvider, queryConfig)
+
+    val execPlan = engine.materialize(lp, QueryContext(origQueryParams = promQlQueryParams))
+
+    execPlan.isInstanceOf[MetadataRemoteExec] shouldEqual (true)
+    val queryParams = execPlan.asInstanceOf[MetadataRemoteExec].queryContext.origQueryParams.asInstanceOf[PromQlQueryParams]
+    queryParams.startSecs shouldEqual (from)
+    queryParams.endSecs shouldEqual (to)
+
+  }
+
+  it("should generate MetadataRemoteExec for TsCardinalies logical plan") {
+    val to = 10000
+    val from = 100
+    val intervalSelector = IntervalSelector(from, to)
+    val lp = new TsCardinalities(Seq("aci-telemetry","test"),3, 2)
 
     val failureProvider = new FailureProvider {
       override def getFailures(datasetRef: DatasetRef, queryTimeRange: TimeRange): Seq[FailureTimeRange] = {
