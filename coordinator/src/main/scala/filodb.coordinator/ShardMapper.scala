@@ -186,33 +186,42 @@ class ShardMapper(val numShards: Int) extends Serializable {
    * The main API for updating a ShardMapper.
    * If you want to throw if an update does not succeed, call updateFromEvent(ev).get
    */
-  def updateFromEvent(event: ShardEvent): Try[Unit] = event match {
-    case e if statusMap.length < e.shard || e.shard < 0 =>
-      Failure(ShardError(e, s"Invalid shard=${e.shard}, unable to update status."))
-    case ShardAssignmentStarted(_, shard, node) =>
-      statusMap(shard) = ShardStatusAssigned
-      registerNode(Seq(shard), node)
-    case IngestionStarted(_, shard, node) =>
-      statusMap(shard) = ShardStatusActive
-      registerNode(Seq(shard), node)
-    case RecoveryStarted(_, shard, node, progress) =>
-      statusMap(shard) = ShardStatusRecovery(progress)
-      registerNode(Seq(shard), node)
-    case RecoveryInProgress(_, shard, node, progress) =>
-      statusMap(shard) = ShardStatusRecovery(progress)
-      registerNode(Seq(shard), node)
-    case IngestionError(_, shard, _) =>
-      statusMap(shard) = ShardStatusError
-      unassignShard(shard)
-    case IngestionStopped(_, shard) =>
-      statusMap(shard) = ShardStatusStopped
-      Success(())
-    case ShardDown(_, shard, node) =>
-      statusMap(shard) = ShardStatusDown
-      unassignShard(shard)
-    case _ =>
-      Success(())
+  def updateFromEvent(event: ShardEvent): Try[Unit] =
+  {
+    logger.info(s"[Clusterv2] in updateFromEvent")
+    logger.info(s"[Clusterv2] event: ${event.toString}")
+    event match {
+      case e if statusMap.length < e.shard || e.shard < 0 =>
+        Failure(ShardError(e, s"Invalid shard=${e.shard}, unable to update status."))
+      case ShardAssignmentStarted(_, shard, node) =>
+        statusMap(shard) = ShardStatusAssigned
+        registerNode(Seq(shard), node)
+      case IngestionStarted(_, shard, node) =>
+        statusMap(shard) = ShardStatusActive
+        registerNode(Seq(shard), node)
+      case RecoveryStarted(_, shard, node, progress) =>
+        statusMap(shard) = ShardStatusRecovery(progress)
+        registerNode(Seq(shard), node)
+      case RecoveryInProgress(_, shard, node, progress) =>
+        statusMap(shard) = ShardStatusRecovery(progress)
+        registerNode(Seq(shard), node)
+      case IngestionError(_, shard, _) =>
+        statusMap(shard) = ShardStatusError
+        logger.info(s"[ClusterV2] Ingestion error ${shard}")
+        unassignShard(shard)
+      case IngestionStopped(_, shard) =>
+        statusMap(shard) = ShardStatusStopped
+        Success(())
+      case ShardDown(_, shard, node) =>
+        logger.info(s"[ClusterV2] ShardDown ${shard}")
+        statusMap(shard) = ShardStatusDown
+        unassignShard(shard)
+      case _ =>
+        Success(())
+    }
   }
+
+
 
   /**
    * Returns the minimal set of events needed to reconstruct this ShardMapper
@@ -232,6 +241,7 @@ class ShardMapper(val numShards: Int) extends Serializable {
    * Idempotent.
    */
   private[coordinator] def registerNode(shards: Seq[Int], coordinator: ActorRef): Try[Unit] = {
+    logger.info(s"[ClusterV2] registeringNode: ${shards}")
     shards foreach {
       case shard =>
         //we always override the mapping. There was code earlier which prevent from

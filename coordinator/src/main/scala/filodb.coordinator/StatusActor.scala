@@ -67,6 +67,7 @@ private[coordinator] class StatusActor(clusterProxy: ActorRef, ackTimeout: Finit
   }
 
   private def sendAndScheduleCheck() = {
+    logger.info("[ClusterV2]")
     scheduledCheck.foreach(_.cancel())
     sequenceNo += 1
     logger.debug(s"Sending events for refs $updatedRefs, sequenceNo=$sequenceNo")

@@ -31,6 +31,8 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
       val hostName = if (fullHostname.contains(".")) fullHostname.substring(0, fullHostname.indexOf('.'))
       else fullHostname
 
+      logger.info(s"[ClusterV2] hostname: ${hostName}")
+
       val pat = "-\\d+$".r
       // extract ordinal at the end from hostname such as filodb-host-0, filodb-host-10
       val ordinal = pat.findFirstIn(hostName).map(ordinal => -Integer.parseInt(ordinal))
@@ -65,6 +67,7 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
     } else
       (ordinal * numShardsPerHost, numShardsPerHost)
     val shardsMapped = (firstShardThisNode until firstShardThisNode + numShardsThisHost).toList
+    logger.info(s"[ClusterV2] shardsMapped: ${shardsMapped} ordinalOfLocalhost: ${ordinalOfLocalhost}")
     shardsMapped
   }
 

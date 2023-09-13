@@ -92,6 +92,7 @@ private[filodb] final class NewNodeCoordinatorActor(memStore: TimeSeriesStore,
 
   private def initShards(dataset: Dataset, ic: IngestionConfig): Unit = {
     val mapper = localShardMaps(dataset.ref)
+    logger.info(s"[ClusterV2] numShards: ${ic.numShards} numNodes: ${ic.minNumNodes}")
     val shardsToStart = clusterDiscovery.shardsForLocalhost(ic.numShards)
     shardsToStart.foreach(sh => updateFromShardEvent(ShardAssignmentStarted(dataset.ref, sh, self)))
     shardsOnThisNode.put(dataset.ref, shardsToStart)
@@ -99,6 +100,7 @@ private[filodb] final class NewNodeCoordinatorActor(memStore: TimeSeriesStore,
   }
 
   private def updateFromShardEvent(event: ShardEvent): Unit = {
+    logger.info(s"[ClusterV2] ShardEvent ${event.toString} Shard: ${event.shard}" )
     localShardMaps.get(event.ref).foreach { mapper =>
       mapper.updateFromEvent(event) match {
         case Failure(l) =>
@@ -107,6 +109,7 @@ private[filodb] final class NewNodeCoordinatorActor(memStore: TimeSeriesStore,
           logger.debug(s"updateFromShardEvent success for dataset=${event.ref} event $event. Mapper now: $mapper")
       }
       // update metrics
+      logger.info(s"[ClusterV2] mapper: ${mapper.prettyPrint}" )
       shardStats(event.ref).update(mapper, skipUnassigned = true)
     }
   }
@@ -152,6 +155,7 @@ private[filodb] final class NewNodeCoordinatorActor(memStore: TimeSeriesStore,
 
   private def startTenantIngestionMetering(): Unit = {
     logger.info(s"Starting tenant level ingestion cardinality metering...")
+    // TODO: Make sure to only send from one region, just like in coordinator v1
     val inst = TenantIngestionMetering(
       settings,
       dsIterProducer = () => { localShardMaps.keysIterator },
