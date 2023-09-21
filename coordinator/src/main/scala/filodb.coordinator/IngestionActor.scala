@@ -115,6 +115,7 @@ private[filodb] final class IngestionActor(ref: DatasetRef,
     */
   // scalastyle:off method.length
   private def resync(state: ShardIngestionState, origin: ActorRef): Unit = {
+    logger.info(s"[ClusterV2] resync: ${state.map.prettyPrint}")
     if (invalid(state.ref)) {
       logger.error(s"$state is invalid for this ingester '$ref'.")
       return
@@ -132,9 +133,11 @@ private[filodb] final class IngestionActor(ref: DatasetRef,
 
     for (shard <- 0 until state.map.numShards) {
       if (state.map.coordForShard(shard) == context.parent) {
+        logger.info(s"[ClusterV2] coordinator check succeeded for shard: ${shard} shardsToStop: ${shardsToStop}")
         if (state.map.isAnIngestionState(shard) || !shutdownAfterStop) {
           if (shardsToStop.contains(shard)) {
             // Is aready ingesting, and it must not be stopped.
+            logger.info(s"[ClusterV2] Removing shard: ${shard}")
             shardsToStop.remove(shard)
           } else {
             try {
@@ -150,10 +153,10 @@ private[filodb] final class IngestionActor(ref: DatasetRef,
         } else {
           val status = state.map.statuses(shard)
           if (shardsToStop.contains(shard)) {
-            logger.info(s"Will stop ingestion for dataset=$ref shard=$shard due to status ${status}")
+            logger.info(s"[ClusterV2] Will stop ingestion for dataset=$ref shard=$shard due to status ${status}")
           } else {
             // Already stopped. Send the message again in case it got dropped.
-            logger.info(s"Stopping ingestion again for dataset=$ref shard=$shard due to status ${status}")
+            logger.info(s"[ClusterV2] Stopping ingestion again for dataset=$ref shard=$shard due to status ${status}")
             sendStopMessage(shard)
           }
         }
@@ -172,6 +175,7 @@ private[filodb] final class IngestionActor(ref: DatasetRef,
 
   // scalastyle:off method.length
   private def startIngestion(shard: Int): Unit = {
+    logger.info(s"[ClusterV2] Starting ingestion for shard: ${shard}")
     try tsStore.setup(ref, schemas, shard, storeConfig, numShards, downsample) catch {
       case ShardAlreadySetup(ds, s) =>
         logger.warn(s"dataset=$ds shard=$s already setup, skipping....")

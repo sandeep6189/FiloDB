@@ -188,8 +188,6 @@ class ShardMapper(val numShards: Int) extends Serializable {
    */
   def updateFromEvent(event: ShardEvent): Try[Unit] =
   {
-    logger.info(s"[Clusterv2] in updateFromEvent")
-    logger.info(s"[Clusterv2] event: ${event.toString}")
     event match {
       case e if statusMap.length < e.shard || e.shard < 0 =>
         Failure(ShardError(e, s"Invalid shard=${e.shard}, unable to update status."))
@@ -207,13 +205,11 @@ class ShardMapper(val numShards: Int) extends Serializable {
         registerNode(Seq(shard), node)
       case IngestionError(_, shard, _) =>
         statusMap(shard) = ShardStatusError
-        logger.info(s"[ClusterV2] Ingestion error ${shard}")
         unassignShard(shard)
       case IngestionStopped(_, shard) =>
         statusMap(shard) = ShardStatusStopped
         Success(())
       case ShardDown(_, shard, node) =>
-        logger.info(s"[ClusterV2] ShardDown ${shard}")
         statusMap(shard) = ShardStatusDown
         unassignShard(shard)
       case _ =>
@@ -241,7 +237,6 @@ class ShardMapper(val numShards: Int) extends Serializable {
    * Idempotent.
    */
   private[coordinator] def registerNode(shards: Seq[Int], coordinator: ActorRef): Try[Unit] = {
-    logger.info(s"[ClusterV2] registeringNode: ${shards}")
     shards foreach {
       case shard =>
         //we always override the mapping. There was code earlier which prevent from

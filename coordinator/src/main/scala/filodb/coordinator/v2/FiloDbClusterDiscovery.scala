@@ -31,6 +31,7 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
       val hostName = if (fullHostname.contains(".")) fullHostname.substring(0, fullHostname.indexOf('.'))
       else fullHostname
 
+      // this is of the format - filodb-raw-tsdb1-3
       logger.info(s"[ClusterV2] hostname: ${hostName}")
 
       val pat = "-\\d+$".r
@@ -74,12 +75,16 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
   def shardsForLocalhost(numShards: Int): Seq[Int] = shardsForOrdinal(ordinalOfLocalhost, numShards)
 
   lazy private val hostNames = {
-    require(settings.minNumNodes.isDefined, "Minimum Number of Nodes config not provided")
+    require(settings.minNumNodes.isDefined, "[ClusterV2] Minimum Number of Nodes config not provided")
     if (settings.k8sHostFormat.isDefined) {
-      (0 until settings.minNumNodes.get).map(i => String.format(settings.k8sHostFormat.get, i.toString))
+      val hosts = (0 until settings.minNumNodes.get)
+        .map(i => InetAddress.getByName(String.format(settings.k8sHostFormat.get, i.toString))
+          .getHostAddress() + ":30001")
+      logger.info(s"[ClusterV2] hosts: " + hosts)
+      hosts.sorted
     } else if (settings.hostList.isDefined) {
       settings.hostList.get.sorted // sort to make order consistent on all nodes of cluster
-    } else throw new IllegalArgumentException("Cluster Discovery mechanism not defined")
+    } else throw new IllegalArgumentException("[ClusterV2] Cluster Discovery mechanism not defined")
   }
 
   lazy private val nodeCoordActorSelections = {
@@ -97,7 +102,7 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
     val empty = CurrentShardSnapshot(ref, new ShardMapper(numShards))
     def fut = (nca ? GetShardMapScatter(ref)) (t).asInstanceOf[Future[CurrentShardSnapshot]]
     Observable.fromFuture(fut).onErrorHandle { e =>
-      logger.error(s"Saw exception on askShardSnapshot: $e")
+      logger.error(s"[ClusterV2] Saw exception on askShardSnapshot: $e")
       empty
     }
   }
@@ -106,6 +111,14 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
                                         numShards: Int,
                                         timeout: FiniteDuration): Observable[ShardMapper] = {
     val acc = new ShardMapper(numShards)
+//    logger.info(s"[ClusterV2] k8sHostFormat: ${settings.k8sHostFormat}, hostlist: ${settings.hostList}")
+//    logger.info(s"[ClusterV2] nodeCoordActorSelections: ${nodeCoordActorSelections} hostnames: ${hostNames}")
+//    nodeCoordActorSelections.foreach(a => a.resolveOne(settings.ResolveActorTimeout)
+//      .recover({
+//      case _ => logger.info(s"[ClusterV2] Unable to resolve actor reference.")
+//                ActorRef.noSender
+//    }))
+
     val snapshots = for {
       nca <- Observable.fromIteratorUnsafe(nodeCoordActorSelections.iterator)
       ncaRef <- Observable.fromFuture(nca.resolveOne(settings.ResolveActorTimeout).recover{case _=> ActorRef.noSender})
@@ -114,13 +127,14 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
     } yield {
       snapshot
     }
+    snapshots.foreach(x => logger.info(s"[ClusterV2] got snapshot update from ${x.map.prettyPrint}"))
     snapshots.map(_.map).foldLeft(acc)(_.mergeFrom(_, ref))
   }
 
   private val datasetToMapper = new ConcurrentHashMap[DatasetRef, ShardMapper]()
   def registerDatasetForDiscovery(dataset: DatasetRef, numShards: Int): Unit = {
     require(failureDetectionInterval.toMillis > 5000, "failure detection interval should be > 5s")
-    logger.info(s"Starting discovery pipeline for $dataset")
+    logger.info(s"[ClusterV2] Starting discovery pipeline for $dataset")
     datasetToMapper.put(dataset, new ShardMapper(numShards))
     val fut = for {
       _ <- Observable.intervalWithFixedDelay(failureDetectionInterval)
