@@ -127,8 +127,14 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
     } yield {
       snapshot
     }
-    snapshots.foreach(x => logger.info(s"[ClusterV2] got snapshot update from ${x.map.prettyPrint}"))
+    //snapshots.foreach(x => logger.info(s"[ClusterV2] got snapshot update from ${x.map.prettyPrint}"))
     snapshots.map(_.map).foldLeft(acc)(_.mergeFrom(_, ref))
+//    val mergedShardMapper = snapshots.map(_.map).foldLeft(acc)(_.mergeFrom(_, ref))
+//    mergedShardMapper.map(x => {
+//      logger.info(s"[ClusterV2] after merge: ${x.prettyPrint}")
+//      datasetToMapper.put(ref, x)
+//    })
+//    mergedShardMapper
   }
 
   private val datasetToMapper = new ConcurrentHashMap[DatasetRef, ShardMapper]()
@@ -141,12 +147,14 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
       mapper <- reduceMappersFromAllNodes(dataset, numShards, failureDetectionInterval - 5.seconds)
     } {
       datasetToMapper.put(dataset, mapper)
+      logger.info(s"[ClusterV2] merged mapper: ${mapper.prettyPrint}")
     }
     discoveryJobs += (dataset -> fut)
   }
 
   def shardMapper(ref: DatasetRef): ShardMapper = {
     val mapper = datasetToMapper.get(ref)
+    logger.info(s"[ClusterV2] got call for ref: ${ref.dataset} mapper: ${mapper.toString} print: ${mapper.prettyPrint}")
     if (mapper == null) new ShardMapper(0) else mapper
   }
 

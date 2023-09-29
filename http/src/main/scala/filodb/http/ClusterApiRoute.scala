@@ -25,6 +25,7 @@ class ClusterApiRoute(clusterProxy: ActorRef) extends FiloRoute with StrictLoggi
       get {
         onSuccess(asyncAsk(clusterProxy, GetShardMap(DatasetRef.fromDotString(dataset)))) {
           case CurrentShardSnapshot(_, map) =>
+            logger.info(s"[ClusterV2] shard map is: ${map.prettyPrint} values: ${map.shardValues}")
             val statusList = map.shardValues.zipWithIndex.map { case ((ref, status), idx) =>
                                HttpShardState(idx, status.toString,
                                               if (ref == ActorRef.noSender) "" else ref.path.address.toString) }

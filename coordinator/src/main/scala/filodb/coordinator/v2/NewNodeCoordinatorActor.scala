@@ -192,6 +192,7 @@ private[filodb] final class NewNodeCoordinatorActor(memStore: TimeSeriesStore,
     // requested from CLI and HTTP API
     case g: GetShardMap =>
       try {
+        logger.info(s"[ClusterV2] GetShardMap requested")
         sender() ! CurrentShardSnapshot(g.ref, clusterDiscovery.shardMapper(g.ref))
       } catch { case e: Exception =>
         logger.error(s"[ClusterV2] Error occurred when processing message $g", e)
