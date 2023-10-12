@@ -77,9 +77,21 @@ class FiloDbClusterDiscovery(settings: FilodbSettings,
   lazy private val hostNames = {
     require(settings.minNumNodes.isDefined, "[ClusterV2] Minimum Number of Nodes config not provided")
     if (settings.k8sHostFormat.isDefined) {
+
+      //${PLATFORM_APPLICATION_ID}-{ORDINAL}.${PLATFORM_APPLICATION_ID}
+      // -srv.${K8S_NAMESPACE}.svc.kube.${K8S_CLUSTER_NAME}.k8s.cloud.apple.com
       val hosts = (0 until settings.minNumNodes.get)
-        .map(i => InetAddress.getByName(String.format(settings.k8sHostFormat.get, i.toString))
-          .getHostAddress() + ":30001")
+        .map(i => {
+          val currentHostname = String.format(
+            settings.k8sHostFormat.get,
+            sys.env("PLATFORM_APPLICATION_ID"),
+            i.toString,
+            sys.env("PLATFORM_APPLICATION_ID"),
+            sys.env("K8S_NAMESPACE"),
+            sys.env("K8S_CLUSTER_NAME"),
+          )
+          s"${currentHostname}:30001"
+        })
       logger.info(s"[ClusterV2] hosts: " + hosts)
       hosts.sorted
     } else if (settings.hostList.isDefined) {
