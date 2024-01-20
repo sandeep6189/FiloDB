@@ -38,15 +38,23 @@ class KafkaIngestionStream(config: Config,
   logger.info(s"Creating consumer assigned to topic ${tp.topic} partition ${tp.partition} offset $offset")
   protected lazy val consumer = createKCO(sc, tp, offset)
 
+  // We are keeping the reference to the underlying kafka consumer object to close it when the KafkaIngestionStream
+  // teardown happens
+  private var _underlying_kafka_consumer: KafkaConsumer[Long, Any] = _
+
   private[filodb] def createKCO(sourceConfig: SourceConfig,
                 topicPartition: TopicPartition,
-                offset: Option[Long]): KafkaConsumerObservable[Long, Any, CommittableMessage[Long, Any]] = {
+                offset: Option[Long]): Observable[CommittableMessage[Long, Any]] = {
 
     val consumer = createConsumer(sourceConfig, topicPartition, offset)
     val cfg = KafkaConsumerConfig(sourceConfig.asConfig)
     require(!cfg.enableAutoCommit, "'enable.auto.commit' must be false.")
 
     KafkaConsumerObservable.manualCommit(cfg, consumer)
+      .guarantee(Task.eval( () => {
+        logger.info(s"Closing underlying kafka consumer for topic: ${tp.topic()} partition: ${tp.partition()}")
+        _underlying_kafka_consumer.close()
+      }))
   }
 
   private[filodb] def createConsumer(sourceConfig: SourceConfig,
@@ -60,10 +68,11 @@ class KafkaIngestionStream(config: Config,
 
       blocking {
         props.put("client.id", s"${props.get("group.id")}.${System.getenv("INSTANCE_ID")}.$shard")
-        val consumer = new KafkaConsumer(props)
-        consumer.assign(List(topicPartition).asJava)
-        offset.foreach { off => consumer.seek(topicPartition, off) }
-        consumer.asInstanceOf[KafkaConsumer[Long, Any]]
+
+        _underlying_kafka_consumer = new KafkaConsumer(props)
+        _underlying_kafka_consumer.assign(List(topicPartition).asJava)
+        offset.foreach { off => _underlying_kafka_consumer.seek(topicPartition, off) }
+        _underlying_kafka_consumer
       }
     }
   }
