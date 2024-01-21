@@ -44,17 +44,13 @@ class KafkaIngestionStream(config: Config,
 
   private[filodb] def createKCO(sourceConfig: SourceConfig,
                 topicPartition: TopicPartition,
-                offset: Option[Long]): Observable[CommittableMessage[Long, Any]] = {
+                offset: Option[Long]): KafkaConsumerObservable[Long, Any, CommittableMessage[Long, Any]] = {
 
     val consumer = createConsumer(sourceConfig, topicPartition, offset)
     val cfg = KafkaConsumerConfig(sourceConfig.asConfig)
     require(!cfg.enableAutoCommit, "'enable.auto.commit' must be false.")
 
     KafkaConsumerObservable.manualCommit(cfg, consumer)
-      .guarantee(Task.eval( () => {
-        logger.info(s"Closing underlying kafka consumer for topic: ${tp.topic()} partition: ${tp.partition()}")
-        _underlying_kafka_consumer.close()
-      }))
   }
 
   private[filodb] def createConsumer(sourceConfig: SourceConfig,
@@ -92,8 +88,13 @@ class KafkaIngestionStream(config: Config,
     }
 
   override def teardown(): Unit = {
-    logger.info(s"Shutting down stream $tp")
-    // consumer does callback to close but confirm
+    logger.info(s"Shutting down stream and closing underlying kafka consumer for " +
+      s"topic: ${tp.topic()} partition: ${tp.partition()}")
+    // Explicitly closing the KafkaConsumer to avoid the `Error registering AppInfo mbean` error when normalIngestion
+    // begins after the doRecovery stage. The KCO also calls close() asynchronously, but by that time we already
+    // attempt to create new KafkaConsumer in normalIngestion. Since, KafkaConsumer close is idempotent, we are
+    // explicitly closing it here
+    _underlying_kafka_consumer.close()
    }
 }
 
