@@ -562,15 +562,14 @@ class SingleClusterPlanner(val dataset: Dataset,
                                                      lp: PeriodicSeriesWithWindowing,
                                                      forceInProcess: Boolean): PlanResult = {
 
+    logger.info("[LE_BUG] materializePeriodicSeriesWithWindowing")
     val logicalPlanWithoutBucket = if (queryConfig.translatePromToFilodbHistogram) {
        removeBucket(Right(lp))._3.right.get
     } else lp
 
     val series = walkLogicalPlanTree(logicalPlanWithoutBucket.series, qContext, forceInProcess)
     val rawSource = logicalPlanWithoutBucket.series.isRaw
-
-    /* Last function is used to get the latest value in the window for absent_over_time
-    If no data is present AbsentFunctionMapper will return range vector with value 1 */
+    logger.info(s"[LE_BUG] materializePeriodicSeriesWithWindowing raw-walk: ${series.toString}, isRaw: $rawSource")
 
     val execRangeFn = if (logicalPlanWithoutBucket.function == RangeFunctionId.AbsentOverTime) Last
                       else InternalRangeFunction.lpToInternalFunc(logicalPlanWithoutBucket.function)
@@ -579,12 +578,16 @@ class SingleClusterPlanner(val dataset: Dataset,
     val realScanEndMs = lp.atMs.getOrElse(logicalPlanWithoutBucket.endMs)
     val realScanStepMs: Long = lp.atMs.map(_ => 0L).getOrElse(lp.stepMs)
 
+    logger.info(s"[LE_BUG] materializePeriodicSeriesWithWindowing FA: ${logicalPlanWithoutBucket.functionArgs}")
     val paramsExec = materializeFunctionArgs(logicalPlanWithoutBucket.functionArgs, qContext)
+    logger.info(s"[LE_BUG] materializePeriodicSeriesWithWindowing, paramsExec: ${paramsExec}" +
+      s"logicalPlanWithoutBucket: ${logicalPlanWithoutBucket.toString}")
     val window = if (execRangeFn == InternalRangeFunction.Timestamp) None else Some(logicalPlanWithoutBucket.window)
     series.plans.foreach(_.addRangeVectorTransformer(PeriodicSamplesMapper(realScanStartMs,
       realScanStepMs, realScanEndMs, window, Some(execRangeFn), qContext,
       logicalPlanWithoutBucket.stepMultipleNotationUsed,
       paramsExec, logicalPlanWithoutBucket.offsetMs, rawSource)))
+    logger.info(s"[LE_BUG] materializePeriodicSeriesWithWindowing AT: ${series.toString}")
     val result = if (logicalPlanWithoutBucket.function == RangeFunctionId.AbsentOverTime) {
       val aggregate = Aggregate(AggregationOperator.Sum, logicalPlanWithoutBucket, Nil,
                                 AggregateClause.byOpt(Seq("job")))
@@ -592,6 +595,7 @@ class SingleClusterPlanner(val dataset: Dataset,
       // If all children have NaN value, sum will yield NaN and AbsentFunctionMapper will yield 1
       val aggregatePlanResult = PlanResult(Seq(addAggregator(aggregate, qContext.copy(plannerParams =
         qContext.plannerParams.copy(skipAggregatePresent = true)), series)))
+      logger.info("[LE_BUG] materializePeriodicSeriesWithWindowing Adding AbsentFunctionMapper")
       addAbsentFunctionMapper(aggregatePlanResult, logicalPlanWithoutBucket.columnFilters,
         RangeParams(realScanStartMs / 1000, realScanStepMs / 1000, realScanEndMs / 1000), qContext)
 
@@ -602,7 +606,7 @@ class SingleClusterPlanner(val dataset: Dataset,
       result.plans.foreach(p => p.addRangeVectorTransformer(RepeatTransformer(lp.startMs, lp.stepMs, lp.endMs,
         p.queryWithPlanName(qContext))))
     }
-
+    logger.info(s"[LE_BUG] materializePeriodicSeriesWithWindowing Before Ret: ${series.toString}")
     result
   }
 
@@ -661,10 +665,11 @@ class SingleClusterPlanner(val dataset: Dataset,
     val rawSeries = walkLogicalPlanTree(lpWithoutBucket.rawSeries, qContext, forceInProcess)
     rawSeries.plans.foreach(_.addRangeVectorTransformer(PeriodicSamplesMapper(realScanStartMs, realScanStepMs,
       realScanEndMs, None, None, qContext, stepMultipleNotationUsed = false, Nil, lp.offsetMs)))
-
+    logger.info(s"[LE_BUG] namefilter: ${nameFilter}, lefilter: ${leFilter}")
     if (nameFilter.isDefined && nameFilter.head.endsWith("_bucket") && leFilter.isDefined) {
       val paramsExec = StaticFuncArgs(leFilter.head.toDouble, RangeParams(realScanStartMs/1000, realScanStepMs/1000,
         realScanEndMs/1000))
+      logger.info(s"[LE_BUG] adding le filter: lefilter: ${leFilter}, paramsExec: ${paramsExec}")
       rawSeries.plans.foreach(_.addRangeVectorTransformer(InstantVectorFunctionMapper(HistogramBucket,
         Seq(paramsExec))))
     }

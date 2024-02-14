@@ -205,6 +205,7 @@ object TestTimeseriesProducer extends StrictLogging {
   def genHistogramData(startTime: Long, numTimeSeries: Int = 16, histSchema: Schema): Stream[InputRecord] = {
     val numBuckets = 10
     val histBucketScheme = bv.GeometricBuckets(2.0, 3.0, numBuckets)
+    logger.info(s"[LE_BUG] histogram buckets: ${histBucketScheme.toString}")
     var buckets = new Array[Long](numBuckets)
     val metric = if (Schemas.deltaHistogram == histSchema) {
                   "http_request_latency_delta"
