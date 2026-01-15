@@ -183,9 +183,14 @@ object GatewayServer extends StrictLogging {
           metricNameOverride = None, namespace = userOpts.nameSpace(),
           workspace = userOpts.workSpace())),
       GeneratorConfig(genOtelCumulativeHistData, otelCumulativeHistogram.name,
-        () => TestTimeseriesProducer.genHistogramData(startTime, numSeries, otelCumulativeHistogram,
-          metricNameOverride = None, namespace = userOpts.nameSpace(),
-          workspace = userOpts.workSpace())),
+        () => TestTimeseriesProducer.genRealOtelHistogramDataMultiPod(
+          Map(
+            "orderdataservice-ww-8559b5ff59-wsszv" -> "/tmp/with_min_max_timeseries.csv",
+            "orderdataservice-ww-8559b5ff59-jrbkh" -> "/tmp/with_min_max_jrbkh.csv",
+            "orderdataservice-ww-8559b5ff59-sjh92" -> "/tmp/with_min_max_sjh92.csv"
+          ),
+          otelCumulativeHistogram
+        )),
       GeneratorConfig(genOtelDeltaHistData, otelDeltaHistogram.name,
         () => TestTimeseriesProducer.genHistogramData(startTime, numSeries, otelDeltaHistogram,
           metricNameOverride = None, namespace = userOpts.nameSpace(),

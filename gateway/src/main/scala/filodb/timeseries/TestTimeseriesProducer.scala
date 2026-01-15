@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets
 import scala.collection.mutable
 import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.io.Source
 import scala.util.Random
 
 import com.typesafe.config.Config
@@ -285,6 +286,175 @@ object TestTimeseriesProducer extends StrictLogging {
         new MetricTagInputRecord(Seq(timestamp, sum, count, hist), metric, tags, histSchema)
       }
     }
+  }
+
+  /**
+   * Generate histogram data from real CSV time series files extracted from production.
+   * Works with any histogram schema (delta, cumulative, OTEL delta, OTEL cumulative, OTEL exponential).
+   *
+   * @param timeSeriesFilePath Path to CSV file with format: le,timestamp,count
+   * @param histSchema Schema to use (supports all histogram schemas)
+   * @param metricName Name of the metric
+   * @param namespace Namespace tag value
+   * @param workspace Workspace tag value
+   * @param podName Pod name for instance tag
+   * @param region Region tag value
+   * @param app Application name
+   * @param layer Layer tag value
+   * @param serviceNamespace Service namespace tag
+   * @return Stream of InputRecords ready for Kafka ingestion
+   */
+  def genRealOtelHistogramData(timeSeriesFilePath: String,
+                                histSchema: Schema,
+                                metricName: String = "retail_oms_ods_saveOrder_timer",
+                                namespace: String = "unisight-retail-aos-prod",
+                                workspace: String = "ist-retail-engineering",
+                                podName: String = "orderdataservice-ww-8559b5ff59-wsszv",
+                                region: String = "us-west-2",
+                                app: String = "orderdataservice",
+                                layer: String = "all.prod.live.aws.pd05aws",
+                                serviceNamespace: String = "ist-retail-engineering"): Stream[InputRecord] = {
+
+    // Read CSV data: le,timestamp,count
+    val lines = Source.fromFile(timeSeriesFilePath).getLines().toList
+
+    // Parse all lines into (le, timestamp, count) tuples
+    val dataPoints = lines.map { line =>
+      val parts = line.split(",")
+      val le = if (parts(0) == "+Inf") Double.PositiveInfinity else parts(0).toDouble
+      val timestamp = parts(1).toLong * 1000 // Convert to milliseconds
+      val count = parts(2).toDouble.toLong
+      (le, timestamp, count)
+    }
+
+    // Group by timestamp
+    val byTimestamp = dataPoints.groupBy(_._2).toSeq.sortBy(_._1)
+
+    // Determine if this schema needs min/max values (OTEL schemas)
+    val needsMinMax = histSchema == Schemas.otelDeltaHistogram ||
+                      histSchema == Schemas.otelCumulativeHistogram ||
+                      histSchema == Schemas.otelExpDeltaHistogram
+
+    // Convert to Stream of InputRecords
+    byTimestamp.toStream.map { case (timestamp, points) =>
+      // Sort by le value to maintain bucket order
+      val sortedPoints = points.sortBy { case (le, _, _) =>
+        if (le.isPosInfinity) Double.MaxValue else le
+      }
+
+      // Extract bucket tops and counts
+      val bucketTops = sortedPoints.map(_._1).toArray
+      val counts = sortedPoints.map(_._3).toArray
+
+      // Create histogram bucket scheme
+      val histBucketScheme = bv.CustomBuckets(bucketTops)
+
+      // Create the histogram
+      val hist = bv.LongHistogram(histBucketScheme, counts)
+
+      // Calculate sum (approximate from bucket midpoints * delta counts)
+      val sum = if (counts.nonEmpty) {
+        var totalSum = 0.0
+        for (i <- 0 until bucketTops.length) {
+          val bucketCount = if (i == 0) counts(i) else counts(i) - counts(i - 1)
+          val bucketMidpoint = if (i == 0) {
+            bucketTops(0) / 2.0
+          } else if (bucketTops(i).isPosInfinity) {
+            bucketTops(i - 1) * 2.0 // Estimate for +Inf bucket
+          } else {
+            (bucketTops(i - 1) + bucketTops(i)) / 2.0
+          }
+          totalSum += bucketCount * bucketMidpoint
+        }
+        totalSum
+      } else 0.0
+
+      // Count is the last bucket value (cumulative)
+      val count = if (counts.nonEmpty) counts.last.toDouble else 0.0
+
+      // Build tags map matching the production metric tags
+      val tags = Map(
+        "app".utf8 -> app.utf8,
+        "telemetry_sdk_language".utf8 -> "java".utf8,
+        "telemetry_sdk_version".utf8 -> "1.15.5".utf8,
+        "pod".utf8 -> podName.utf8,
+        "service_name".utf8 -> "retail-eng-dev".utf8,
+        wsUTF8 -> workspace.utf8,
+        "service_namespace".utf8 -> serviceNamespace.utf8,
+        "layer".utf8 -> layer.utf8,
+        "telemetry_sdk_name".utf8 -> "io.micrometer".utf8,
+        "hostname".utf8 -> podName.utf8,
+        partUTF8 -> "ww".utf8,
+        nsUTF8 -> namespace.utf8,
+        "region".utf8 -> region.utf8
+      )
+
+      // Create the InputRecord with or without min/max based on schema
+      if (needsMinMax) {
+        // OTEL schemas include min and max values
+        val minVal = 0.0
+        val maxVal = 0.0
+        new MetricTagInputRecord(
+          Seq(timestamp, sum, count, hist, minVal, maxVal),
+          metricName,
+          tags,
+          histSchema
+        )
+      } else {
+        // Non-OTEL schemas don't have min/max
+        new MetricTagInputRecord(
+          Seq(timestamp, sum, count, hist),
+          metricName,
+          tags,
+          histSchema
+        )
+      }
+    }
+  }
+
+  /**
+   * Load histogram data from multiple pods to simulate full cluster behavior.
+   * Works with any histogram schema (delta, cumulative, OTEL delta, OTEL cumulative, OTEL exponential).
+   *
+   * @param filePathsByPod Map of pod name -> CSV file path
+   * @param histSchema Schema to use (supports all histogram schemas)
+   * @param metricName Metric name
+   * @param namespace Namespace tag
+   * @param workspace Workspace tag
+   * @param region Region tag
+   * @param app Application name
+   * @param layer Layer tag
+   * @param serviceNamespace Service namespace tag
+   * @return Combined stream of InputRecords from all pods
+   */
+  def genRealOtelHistogramDataMultiPod(filePathsByPod: Map[String, String],
+                                        histSchema: Schema,
+                                        metricName: String = "retail_oms_ods_saveOrder_timer",
+                                        namespace: String = "unisight-retail-aos-prod",
+                                        workspace: String = "ist-retail-engineering",
+                                        region: String = "us-west-2",
+                                        app: String = "orderdataservice",
+                                        layer: String = "all.prod.live.aws.pd05aws",
+                                        serviceNamespace: String = "ist-retail-engineering"): Stream[InputRecord] = {
+
+    // Generate streams for each pod
+    val allPodStreams = filePathsByPod.map { case (podName, filePath) =>
+      genRealOtelHistogramData(
+        timeSeriesFilePath = filePath,
+        histSchema = histSchema,
+        metricName = metricName,
+        namespace = namespace,
+        workspace = workspace,
+        podName = podName,
+        region = region,
+        app = app,
+        layer = layer,
+        serviceNamespace = serviceNamespace
+      )
+    }.toList
+
+    // Flatten all streams - they are already sorted by timestamp from CSV
+    allPodStreams.flatten.toStream
   }
 }
 
