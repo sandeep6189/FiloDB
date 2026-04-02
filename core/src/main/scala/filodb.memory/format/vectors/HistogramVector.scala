@@ -297,7 +297,7 @@ object HistogramVector extends StrictLogging {
   import WireFormat._
 
   def apply(acc: MemoryReader, p: BinaryVectorPtr): HistogramReader = BinaryVector.vectorType(acc, p) match {
-    case x if x == WireFormat(VECTORTYPE_HISTOGRAM, SUBTYPE_H_SIMPLE) => new RowHistogramReader(acc, Ptr.U8(p))
+    case x if x == WireFormat(VECTORTYPE_HISTOGRAM, SUBTYPE_H_SIMPLE) => new DeltaHistogramReader(acc, Ptr.U8(p))
     case x if x == WireFormat(VECTORTYPE_HISTOGRAM, SUBTYPE_H_SECTDELTA) => new SectDeltaHistogramReader(acc, Ptr.U8(p))
     case x if x == WireFormat(VECTORTYPE_HISTOGRAM, SUBTYPE_H_EXP_SIMPLE) => new RowExpHistogramReader(acc, Ptr.U8(p))
   }
@@ -604,14 +604,76 @@ class RowHistogramReader(val acc: MemoryReader, histVect: Ptr.U8) extends Histog
   }
 
   // sum_over_time returning a Histogram with sums for each bucket.  Start and end are inclusive row numbers
-  // NOTE: for now this is just a dumb implementation that decompresses each histogram fully
-  final def sum(start: Int, end: Int): MutableHistogram = {
+  // Subclasses may override for optimized implementations (see DeltaHistogramReader)
+  def sum(start: Int, end: Int): MutableHistogram = {
     require(length > 0 && start >= 0 && end < length)
     val summedHist = MutableHistogram.empty(buckets)
     cforRange { start to end } { i =>
       summedHist.addNoCorrection(apply(i))
     }
     summedHist
+  }
+}
+
+/**
+ * Optimized reader for SUBTYPE_H_SIMPLE (delta histogram) vectors.
+ * Overrides only sum() — all other methods inherited from RowHistogramReader unchanged.
+ *
+ * Why a separate class: RowHistogramReader.sum() uses apply(i) → addNoCorrection() which
+ * is correct for all subtypes but incurs overhead that can be avoided for delta histograms
+ * where each blob is independently encoded. SectDeltaHistogramReader and RowExpHistogramReader
+ * are unaffected — they never see this class.
+ */
+class DeltaHistogramReader(acc2: MemoryReader, histVect2: Ptr.U8)
+      extends RowHistogramReader(acc2, histVect2) {
+
+  /**
+   * Optimized sum for delta histograms (SUBTYPE_H_SIMPLE).
+   *
+   * Called by: rate(delta_hist[5m]) → RateOverDeltaChunkedFunctionH → SumOverTimeChunkedFunctionH
+   * Query:     histogram_quantile(0.99, sum(rate(delta_hist[5m])))
+   *
+   * Each blob in a SIMPLE vector is independently NibblePack delta-encoded into Long[] values.
+   * This method accumulates bucket sums directly in Long[], converting to Double[] once at the
+   * end — avoiding per-histogram overhead from the base implementation:
+   *
+   *   1. Long→Double: 30×20=600 conversions → 20 (once at end)
+   *   2. Virtual dispatch: 30× similarForMath + 600× bucketValue → 0
+   *   3. NaN init: Arrays.fill(NaN) + branch per call → 0 (Long[] is zero-init)
+   *
+   * Safety: similarForMath is safe to skip because all histograms in a single
+   * HistogramVector share the same bucket scheme — enforced by matchBucketDef()
+   * in AppendableHistogramVector.addData().
+   *
+   *   ┌──────────────────────────────────────────────────────────┐
+   *   │  acc = new Long[N]              ← zero-init, no NaN      │
+   *   │  for i in [start..end]:                                  │
+   *   │    locate(i)                    ← O(1) for sequential    │
+   *   │    unpack(blob[i]) → Long[N]    ← dedicated sink         │
+   *   │    acc[b] += values[b]          ← Long add, no toDouble  │
+   *   │  result = acc.map(_.toDouble)   ← convert once at end    │
+   *   └──────────────────────────────────────────────────────────┘
+   */
+  override def sum(start: Int, end: Int): MutableHistogram = {
+    require(length > 0 && start >= 0 && end < length)
+    val longAcc = new Array[Long](numBuckets)
+    val sink = NibblePack.DeltaSink(new Array[Long](numBuckets))
+    cforRange { start to end } { i =>
+      val histPtr = locate(i)
+      val histLen = histPtr.asU16.getU16(acc)
+      val buf = BinaryHistogram.valuesBuf
+      acc.wrapInto(buf, histPtr.add(2).addr, histLen)
+      sink.reset()
+      NibblePack.unpackToSink(buf, sink, numBuckets)
+      cforRange { 0 until numBuckets } { b =>
+        longAcc(b) += sink.outArray(b)
+      }
+    }
+    val result = new Array[Double](numBuckets)
+    cforRange { 0 until numBuckets } { b =>
+      result(b) = longAcc(b).toDouble
+    }
+    MutableHistogram(buckets, result)
   }
 }
 
