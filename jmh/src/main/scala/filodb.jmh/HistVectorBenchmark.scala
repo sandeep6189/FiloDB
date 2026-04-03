@@ -8,7 +8,7 @@ import org.openjdk.jmh.infra.Blackhole
 
 import filodb.memory.NativeMemoryManager
 import filodb.memory.format._
-import filodb.memory.format.vectors.BinaryHistogram
+import filodb.memory.format.vectors.{BinaryHistogram, HistogramVector}
 
 @State(Scope.Thread)
 class HistVectorBenchmark {
@@ -96,51 +96,57 @@ class HistVectorBenchmark {
   }
 
   // ── sum() benchmark: simulates rate(delta_hist[5m]) hot path ───────
-  // 20-bucket geometric histograms, 30 samples (5m window @ 10s interval)
-  val scheme20 = GeometricBuckets(1.0, 2.0, 20)
+  // Parameterized by bucket count. 30 samples = 5m window @ 10s interval.
+  // Runs both optimized (DeltaHistogramReader) and baseline (RowHistogramReader) paths.
+  //
+  // Run all:  sbt "jmh/jmh:run -i 5 -wi 3 -f 1 filodb.jmh.HistDeltaSumBenchmark"
+  // Run one:  sbt "jmh/jmh:run -i 5 -wi 3 -f 1 -p numBuckets=20 filodb.jmh.HistDeltaSumBenchmark"
+}
+
+@State(Scope.Thread)
+class HistDeltaSumBenchmark {
+  import vectors._
+
+  val memFactory = new NativeMemoryManager(100 * 1024 * 1024)
+  val buffer = new UnsafeBuffer(new Array[Byte](4096))
   final val numSamplesInWindow = 30
-  val sumAppender20: BinaryAppendableVector[org.agrona.DirectBuffer] = {
-    val app = HistogramVector.appending(memFactory, 15000)
+
+  @Param(Array("5", "10", "15", "20", "30", "127"))
+  var numBuckets: Int = 20
+
+  var appender: BinaryAppendableVector[org.agrona.DirectBuffer] = _
+
+  @Setup(Level.Trial)
+  def setup(): Unit = {
+    val scheme = if (numBuckets == 127) Base2ExpHistogramBuckets(3, -78, 126)
+                 else GeometricBuckets(1.0, 2.0, numBuckets)
+    appender = HistogramVector.appending(memFactory, 15000)
     val rng = new java.util.Random(42)
+    val bucketCount = scheme.numBuckets
     (0 until numSamplesInWindow).foreach { _ =>
-      val raw = new Array[Long](20)
-      (0 until 20).foreach { i => raw(i) = rng.nextInt(1000).toLong }
-      (1 until 20).foreach { i => raw(i) += raw(i - 1) }
-      BinaryHistogram.writeDelta(scheme20, raw, buffer)
-      if (app.addData(buffer) != Ack) {
-        throw new RuntimeException("Failed to add 20-bucket histogram")
+      val raw = new Array[Long](bucketCount)
+      (0 until bucketCount).foreach { i => raw(i) = rng.nextInt(1000).toLong }
+      (1 until bucketCount).foreach { i => raw(i) += raw(i - 1) }
+      BinaryHistogram.writeDelta(scheme, raw, buffer)
+      if (appender.addData(buffer) != Ack) {
+        throw new RuntimeException(s"Failed to add $bucketCount-bucket histogram")
       }
     }
-    app
   }
 
   @Benchmark
-  @BenchmarkMode(Array(Mode.Throughput, Mode.AverageTime))
+  @BenchmarkMode(Array(Mode.AverageTime))
   @OutputTimeUnit(TimeUnit.MICROSECONDS)
-  def sumDeltaHist20Buckets(blackhole: Blackhole): Unit = {
-    val r = sumAppender20.reader.asHistReader
-    blackhole.consume(r.sum(0, numSamplesInWindow - 1))
-  }
-
-  // 127-bucket OTel exp histograms, 30 samples
-  val sumAppender127: BinaryAppendableVector[org.agrona.DirectBuffer] = {
-    val app = HistogramVector.appending(memFactory, 15000)
-    (0 until numSamplesInWindow).foreach { _ =>
-      val hist = LongHistogram(bucketScheme, counts)
-      hist.serialize(Some(buffer))
-      if (app.addData(buffer) != Ack) {
-        throw new RuntimeException("Failed to add 127-bucket histogram")
-      }
-    }
-    app
+  def sumOptimized(bh: Blackhole): Unit = {
+    HistogramVector.optimizedDeltaSumEnabled = true
+    bh.consume(appender.reader.asHistReader.sum(0, numSamplesInWindow - 1))
   }
 
   @Benchmark
-  @BenchmarkMode(Array(Mode.Throughput, Mode.AverageTime))
+  @BenchmarkMode(Array(Mode.AverageTime))
   @OutputTimeUnit(TimeUnit.MICROSECONDS)
-  def sumDeltaHist127Buckets(blackhole: Blackhole): Unit = {
-    val r = sumAppender127.reader.asHistReader
-    blackhole.consume(r.sum(0, numSamplesInWindow - 1))
+  def sumBaseline(bh: Blackhole): Unit = {
+    HistogramVector.optimizedDeltaSumEnabled = false
+    bh.consume(appender.reader.asHistReader.sum(0, numSamplesInWindow - 1))
   }
-
 }

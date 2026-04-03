@@ -515,6 +515,28 @@ class HistogramVectorTest extends NativeVectorTest {
     (0 until 8).foreach { b => sum.bucketValue(b) shouldEqual 0.0 }
   }
 
+  it("optimized and non-optimized sum should produce identical results") {
+    val appender = HistogramVector.appending(memFactory, 100 * 30)
+    val rng = new scala.util.Random(99)
+    (0 until 100).foreach { _ =>
+      val raw = (0 until 8).map(_ => rng.nextInt(1000).toLong).toArray
+      (1 until 8).foreach { i => raw(i) += raw(i - 1) }
+      BinaryHistogram.writeDelta(bucketScheme, raw, buffer)
+      appender.addData(buffer) shouldEqual Ack
+    }
+    val reader = appender.reader.asHistReader
+
+    // Non-optimized (base RowHistogramReader.sum via toggle)
+    HistogramVector.optimizedDeltaSumEnabled = false
+    val baseSum = reader.sum(0, 99)
+
+    // Optimized (DeltaHistogramReader.sum)
+    HistogramVector.optimizedDeltaSumEnabled = true
+    val optSum = reader.sum(0, 99)
+
+    optSum.values shouldEqual baseSum.values
+  }
+
   val incrAppender = HistogramVector.appendingSect(memFactory, 1024)
   incrHistBuckets.foreach { rawBuckets =>
     BinaryHistogram.writeDelta(bucketScheme, rawBuckets.map(_.toLong), buffer)

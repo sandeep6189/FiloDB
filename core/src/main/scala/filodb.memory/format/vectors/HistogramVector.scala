@@ -237,6 +237,12 @@ object BinaryHistogram extends StrictLogging {
 object HistogramVector extends StrictLogging {
   type HistIterator = Iterator[Histogram] with TypedIterator
 
+  /** Toggle for optimized delta histogram sum. When false, DeltaHistogramReader falls back
+   *  to the base RowHistogramReader.sum() implementation.
+   *  Configurable via system property `filodb.histogram.optimized-delta-sum` (default: true). */
+  @volatile var optimizedDeltaSumEnabled: Boolean =
+    java.lang.Boolean.parseBoolean(System.getProperty("filodb.histogram.optimized-delta-sum", "true"))
+
   val OffsetNumHistograms = 6
   val OffsetFormatCode = 8     // u8: BinHistogram format code/bucket type
   val OffsetBucketDefSize = 9  // # of bytes of bucket definition
@@ -635,26 +641,59 @@ class DeltaHistogramReader(acc2: MemoryReader, histVect2: Ptr.U8)
    *
    * Each blob in a SIMPLE vector is independently NibblePack delta-encoded into Long[] values.
    * This method accumulates bucket sums directly in Long[], converting to Double[] once at the
-   * end — avoiding per-histogram overhead from the base implementation:
+   * end — avoiding per-histogram overhead from the base implementation.
    *
-   *   1. Long→Double: 30×20=600 conversions → 20 (once at end)
-   *   2. Virtual dispatch: 30× similarForMath + 600× bucketValue → 0
-   *   3. NaN init: Arrays.fill(NaN) + branch per call → 0 (Long[] is zero-init)
+   * Difference from super.sum():
+   *
+   *   super.sum() [RowHistogramReader]:
+   *   ┌──────────────────────────────────────────────────────────┐
+   *   │  result = MutableHistogram(Double[N], filled with NaN)   │
+   *   │  for i in [start..end]:                                  │
+   *   │    apply(i):                                             │
+   *   │      locate(i)                                           │
+   *   │      NibblePack.unpackToSink → shared returnHist (Long[])│
+   *   │    addNoCorrection(returnHist):                          │
+   *   │      buckets.similarForMath(other.buckets) ← virtual call│
+   *   │      if isNaN(values(0)): Arrays.fill(0.0) ← 1st-call   │
+   *   │      for b in 0..N:                                      │
+   *   │        values(b) += other.bucketValue(b) ← virtual call  │
+   *   │                     ↑ returns Long.toDouble per bucket    │
+   *   └──────────────────────────────────────────────────────────┘
+   *
+   *   this.sum() [DeltaHistogramReader]:
+   *   ┌──────────────────────────────────────────────────────────┐
+   *   │  longAcc = new Long[N]           ← zero by JVM spec      │
+   *   │  sink = new DeltaSink(Long[N])   ← dedicated, not shared │
+   *   │  for i in [start..end]:                                  │
+   *   │    locate(i)                     ← same section walk      │
+   *   │    NibblePack.unpackToSink → sink.outArray (Long[])      │
+   *   │    for b in 0..N:                                        │
+   *   │      longAcc(b) += sink.outArray(b) ← Long += Long       │
+   *   │                    ↑ direct array access, no virtual call │
+   *   │  result(b) = longAcc(b).toDouble ← convert once at end   │
+   *   └──────────────────────────────────────────────────────────┘
+   *
+   * Example Scenario:
+   * Window = 5m
+   * Publishing Interval = 10s
+   * Num Histograms = 30
+   * Num Bucket Per Histogram = 20
+   *
+   * What this saves (for 30 histograms × 20 buckets):
+   *   1. Long→Double: 600 conversions → 20 (97% reduction)
+   *   2. Virtual dispatch: 630 calls → 0 (similarForMath + bucketValue)
+   *   3. NaN: Arrays.fill + branch per call → 0 (Long[] is zero-init)
    *
    * Safety: similarForMath is safe to skip because all histograms in a single
    * HistogramVector share the same bucket scheme — enforced by matchBucketDef()
-   * in AppendableHistogramVector.addData().
+   * in AppendableHistogramVector.addData(). Inter-chunk bucket scheme differences
+   * are handled by SumOverTimeChunkedFunctionH.addTimeChunks() which calls
+   * MutableHistogram.add() (with similarForMath check) when combining chunk results.
    *
-   *   ┌──────────────────────────────────────────────────────────┐
-   *   │  acc = new Long[N]              ← zero-init, no NaN      │
-   *   │  for i in [start..end]:                                  │
-   *   │    locate(i)                    ← O(1) for sequential    │
-   *   │    unpack(blob[i]) → Long[N]    ← dedicated sink         │
-   *   │    acc[b] += values[b]          ← Long add, no toDouble  │
-   *   │  result = acc.map(_.toDouble)   ← convert once at end    │
-   *   └──────────────────────────────────────────────────────────┘
+   * Toggle: set HistogramVector.optimizedDeltaSumEnabled = false to fall back to super.sum().
    */
   override def sum(start: Int, end: Int): MutableHistogram = {
+    if (!HistogramVector.optimizedDeltaSumEnabled) return super.sum(start, end)
     require(length > 0 && start >= 0 && end < length)
     val longAcc = new Array[Long](numBuckets)
     val sink = NibblePack.DeltaSink(new Array[Long](numBuckets))
